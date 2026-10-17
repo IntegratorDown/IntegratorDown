@@ -1,0 +1,65 @@
+//! `integratordown-agent` 官方客户端常驻后端。
+// 发布构建由开机自启直接拉起：GUI 子系统，登录时不弹控制台窗口。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+/// mimalloc 全局分配器：多线程 tokio 下吞吐与内存碎片均优于 musl/glibc 默认分配器。
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+fn main() -> integratordown_agent::runtime::AgentResult {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // 桌面界面进程为前台打开文件 / 文件夹拉起的一次性进程：不初始化日志 / 运行时，执行后即退出。
+    if let Some(code) = integratordown_agent::platform::run_shell_open(&args) {
+        std::process::exit(code);
+    }
+    #[cfg(windows)]
+    if let Some(result) = integratordown_agent::notification::handle_activation(&args) {
+        integratordown_agent::logging::init_desktop();
+        let result = result.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            std::io::Error::other(error).into()
+        });
+        integratordown_agent::logging::finish(&result);
+        return result;
+    }
+    // `--server`：headless 服务器形态（NAS / Docker）。不启动托盘、不接入桌面集成，
+    // 监听地址、访问密钥、Web UI 等全部来自 `INTEGRATORDOWN_*` 环境变量。
+    if args.iter().any(|arg| arg == "--server") {
+        let result = integratordown_agent::server_mode::run_blocking(
+            integratordown_agent::shell::ShellHost::without_tray(
+                integratordown_protocol::TrayUnavailableReason::NotBuilt,
+                false,
+            ),
+        );
+        // 运行期（含 daemon）已完全结束：此时才能执行更新后的重启（Unix 上 exec 成功不再返回）。
+        run_restart_plan();
+        return result;
+    }
+    let autostart = args
+        .iter()
+        .any(|arg| arg == integratordown_agent::platform::AUTOSTART_ARG);
+    integratordown_agent::logging::init_desktop();
+    let result = {
+        #[cfg(feature = "desktop")]
+        {
+            integratordown_agent::shell::host::run(autostart, integratordown_agent::runtime::run_blocking)
+        }
+        #[cfg(not(feature = "desktop"))]
+        {
+            integratordown_agent::runtime::run_blocking(integratordown_agent::shell::ShellHost::without_tray(
+                integratordown_protocol::TrayUnavailableReason::NotBuilt,
+                autostart,
+            ))
+        }
+    };
+    // 托盘事件循环已结束且 runtime 线程已 join：daemon 已退出、`agent.lock` 已释放。
+    run_restart_plan();
+    integratordown_agent::logging::finish(&result);
+    result
+}
+
+/// 执行 `update::restart` 登记的重启计划（没有计划时无操作）；失败只记日志，进程照常退出。
+fn run_restart_plan() {
+    if let Err(error) = integratordown_agent::update::restart::run_pending() {
+        tracing::error!(%error, "could not restart IntegratorDown after the update");
+    }
+}

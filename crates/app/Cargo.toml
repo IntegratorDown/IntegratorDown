@@ -1,0 +1,57 @@
+[package]
+name = "integratordown_ui_app"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "integratordown-desktop"
+path = "src/main.rs"
+
+# Windows 便携版的 integrator_down.exe：旧 Flutter 更新器固定重启该名，转交 integratordown-desktop。
+[[bin]]
+name = "integrator_down"
+path = "src/legacy_launcher.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+directories = "6"
+integratordown_protocol = { version = "0.1.0", path = "../../native/protocol" }
+integratordown_ui_command_palette = { version = "0.1.0", path = "../command_palette" }
+integratordown_ui_account = { version = "0.1.0", path = "../account" }
+integratordown_ui_downloads = { path = "../downloads" }
+integratordown_ui_extensions = { version = "0.1.0", path = "../extensions" }
+integratordown_ui_i18n = { path = "../i18n" }
+integratordown_ui_icon_pack = { path = "../icon_pack" }
+integratordown_ui_rss = { version = "0.1.0", path = "../rss" }
+integratordown_ui_settings = { path = "../settings" }
+integratordown_ui_shell = { path = "../shell" }
+integratordown_ui_theme = { path = "../theme" }
+futures-util = "0.3.32"
+gpui = { workspace = true, features = ["windows-manifest-provided-by-host"] }
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+gpui_platform = { workspace = true, features = ["windows-manifest-provided-by-host"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "process", "time", "net", "macros", "fs"] }
+tokio-tungstenite = "0.29"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+integratordown_ui_components = { version = "0.1.0", path = "../components" }
+mimalloc = "0.1.52"
+log = "0.4"
+integratordown_logfile = { version = "0.1.0", path = "../../native/logfile" }
+base64 = "0.22"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSRunningApplication", "NSDockTile", "NSImage", "NSImageView", "NSView", "NSResponder", "NSControl", "NSCell"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSGeometry", "NSObject"] }

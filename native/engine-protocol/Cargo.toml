@@ -1,0 +1,19 @@
+[package]
+name = "integratordown_engine_protocol"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+integratordown_engine = { version = "0.1.0", path = "../engine", default-features = false }
+integratordown_protocol = { version = "0.1.0", path = "../protocol" }
+
+[features]
+default = []
+plugins = ["integratordown_engine/plugins"]
+components = ["integratordown_engine/components"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json = "1"

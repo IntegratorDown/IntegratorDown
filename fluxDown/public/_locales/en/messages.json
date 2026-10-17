@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "IntegratorDown",
+    "description": "The name of the extension"
+  },
+  "extensionDescription": {
+    "message": "Intercept browser downloads and send to IntegratorDown app for high-speed downloading",
+    "description": "The description of the extension"
+  }
+}

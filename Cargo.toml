@@ -1,0 +1,85 @@
+# This file is used for telling Rust-related tools
+# where various Rust crates are.
+# This also unifies `target` output folder and
+# various Rust configurations.
+
+[workspace]
+resolver = "3"
+members = ["native/*", "crates/*", "scripts/desktop-dev"]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+# GPUI 走 gpui-kit 发布时精确锁定的 `gpui-pre` 快照；升级 gpui-kit 时必须同步到它
+# `Cargo.toml` 里的同一 `=` 版本，否则 gpui-component 可能与 GPUI API 不匹配。
+# 实际实现由下方 `[patch.crates-io]` 换成 gpui-fast（同名同版本的兼容壳）。
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-base = "0.7.1"
+gpui-component = "0.7.1"
+gpui-component-assets = { package = "gpui-kit-assets", version = "0.7.1" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0"
+winresource = "0.1.31"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+expect_used = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
+todo = "deny"
+unimplemented = "deny"
+undocumented_unsafe_blocks = "deny"
+unused_result_ok = "deny"
+unwrap_used = "deny"
+wildcard_imports = "deny"
+
+[patch.crates-io]
+# zerx-lab/rqbit main = 上游 ikatson/rqbit main（v9.0.1 之后）+ lingdiansr MSE
+# + Android HTTPS 修复（bundled webpki 根替代需 JNI 初始化的 rustls-platform-verifier，否则 Android 上任何
+# https tracker 都会 panic 掉磁力解析）+ tracker panic 隔离 + 握手超时下发到 Live 种子的 peer 连接。
+librqbit = { git = "https://github.com/zerx-lab/rqbit", rev = "00374a6d772d4123f079f5adf6a1fe013e363381" }
+# 上游 0.7.0 在 iOS 上编译失败（Apple 平台只放行 macOS 的按索引绑定），补丁见源码内 `IntegratorDown 补丁` 注释；
+# 上游修复发布后删除本条与 third_party/ 副本。
+librqbit-dualstack-sockets = { path = "third_party/librqbit-dualstack-sockets" }
+# GPUI 核心换成 gpui-fast（Retained Mode + 滚动图层）：其 `compat/` 以 gpui-pre 同名同版本
+# 再导出自身 crate，整张依赖图（含 gpui-component）共用同一 GPUI 核心。升级 gpui-kit 时
+# 必须等 gpui-fast 的 compat 跟到同一快照版本，否则补丁不生效（cargo 警告 patch 未使用）。
+# 渲染读取的状态须在 entity / global / ListState / ScrollHandle 内，改了要 notify 读者；
+# 排查界面陈旧时用 `GPUI_VIEW_RETENTION=0`（关复用）/ `GPUI_SCROLL_LAYERS=0`（关滚动图层）对照。
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
+
+# BT 数据面（逐字节 RC4、逐消息解析、MSE DH 大数运算）在 opt-level 0 下慢一个数量级：
+# 本地 loopback 实测 dev 基线 36.5 CPU·s/GB、吞吐封顶 165 MB/s；仅下面 5 个 crate
+# 开 O3 后 4.8 CPU·s/GB、854 MB/s。开发期跑 integratordownd 下 BT 不再吃满多核。
+[profile.dev.package.librqbit]
+opt-level = 3
+
+[profile.release]
+# 全部 release 产物（GPUI 桌面端、agent、integratordownd、CLI、原生移动端核心、nmh、
+# Docker/NAS 包）共用本 profile，统一按运行期性能优先：opt-level=3 + fat LTO +
+# 单 codegen 单元，换取最佳吞吐/延迟，代价是产物体积和编译时间。
+# 不再用 "z"：它关闭循环向量化、压低内联阈值，BT 数据面（DH768 2.46 vs 1.60 ms）、
+# 哈希/校验、GPUI 布局等热路径都会明显变慢；体积收益对下载器不划算。
+opt-level = 3
+# Full LTO：跨 crate 内联 + 死代码消除最彻底，同时利于速度与体积
+lto = "fat"
+# 单一 codegen 单元：给 LLVM 完整优化视野（牺牲并行编译速度）
+codegen-units = 1
+# 移除全部符号：不影响运行期性能，只减小分发体积
+strip = true
+# 注意：不设 panic = "abort" —— engine 的 download_manager 依赖 catch_unwind
+# 恢复 task panic（见 AGENTS.md），abort 会让 panic 直接终止进程。

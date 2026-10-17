@@ -1,0 +1,11 @@
+//! 输出 OpenAPI 3.1 规范到 stdout。
+//!
+//! 官网文档页（Scalar）的数据源生成命令：
+//!
+//! ```bash
+//! cargo run -p integratordown_api --example gen_openapi > website-v2/public/openapi.json
+//! ```
+
+fn main() {
+    println!("{}", integratordown_api::openapi::openapi_json());
+}

@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "store_id": "zerx-integratordown",
+  "name": {
+    "en_US": "IntegratorDown Store",
+    "zh_CN": "IntegratorDown 应用商店"
+  },
+  "description": {
+    "en_US": "Official IntegratorDown download manager for CasaOS / ZimaOS",
+    "zh_CN": "IntegratorDown 下载管理器官方 CasaOS / ZimaOS 源"
+  },
+  "maintainer": "zerx-lab",
+  "url": ""
+}

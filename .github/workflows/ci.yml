@@ -1,0 +1,235 @@
+name: CI
+
+# 合并前门禁：与 AGENTS.md 一致（fmt + clippy -D warnings），按 crate 分组 nextest（禁 --workspace），
+# 并构建 Web SPA / 官网 / 扩展，避免构建期问题只在 v* tag 发布流水线里暴露。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.f.outputs.rust }}
+      web: ${{ steps.f.outputs.web }}
+      website: ${{ steps.f.outputs.website }}
+      extension: ${{ steps.f.outputs.extension }}
+      android: ${{ steps.f.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            rust:
+              - 'native/**'
+              - 'crates/**'
+              - 'scripts/desktop-dev/**'
+              - 'assets/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            web:
+              - 'web/**'
+              - 'assets/i18n/**'
+              - 'website-v2/src/lib/gpui-theme/**'
+              - 'assets/icon-packs/**'
+              - 'crates/icon_pack/tests/fixtures/**'
+              - '.github/workflows/ci.yml'
+            website:
+              - 'website-v2/**'
+              - 'assets/i18n/**'
+              - '.github/workflows/ci.yml'
+            extension:
+              - 'integratorDown/**'
+              - '.github/workflows/ci.yml'
+            android:
+              - 'mobile/Android/**'
+              - 'native/**'
+              - 'assets/i18n/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
+  rust-lint:
+    name: Rust fmt + clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake pkg-config zstd libfuse2 desktop-file-utils \
+            libasound2-dev libfontconfig-dev libfreetype-dev libglib2.0-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libzstd-dev libdbus-1-dev \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-lint
+          cache-on-failure: true
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      # native/server 已冻结（不构建、不接收改动），不进门禁。测试代码同样过 clippy：
+      # 测试里允许 unwrap/expect（clippy.toml），其余 lint 一视同仁。
+      - name: cargo clippy
+        run: cargo clippy --workspace --exclude integratordown_server --all-targets -- -D warnings
+
+  rust-test:
+    name: Test (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: engine
+            packages: "-p integratordown_engine"
+          - name: core
+            packages: "-p integratordown_api -p integratordown_protocol -p integratordown_daemon -p integratordown_engine_protocol -p integratordown_link -p integratordown_logfile -p integratordown_cli"
+          - name: agent
+            packages: "-p integratordown_agent"
+          - name: mobile
+            packages: "-p integratordown_mobile"
+          - name: gpui
+            packages: "-p integratordown_ui_account -p integratordown_ui_app -p integratordown_ui_command_palette -p integratordown_ui_components -p integratordown_ui_downloads -p integratordown_ui_extensions -p integratordown_ui_i18n -p integratordown_ui_rss -p integratordown_ui_settings -p integratordown_ui_shell -p integratordown_ui_theme"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake pkg-config zstd libfuse2 desktop-file-utils \
+            libasound2-dev libfontconfig-dev libfreetype-dev libglib2.0-dev \
+            libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libvulkan-dev libzstd-dev libdbus-1-dev \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-test-${{ matrix.name }}
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@nextest
+
+      # 引擎的协议测试在 verify-engine 中已含 librqbit MSE 校验；此处只跑 crate 单测。
+      - name: cargo nextest
+        run: cargo nextest run --locked --no-tests=pass ${{ matrix.packages }}
+
+  web:
+    name: Web SPA (lint + test + build)
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run test
+      - run: bun run build
+
+  website-v2:
+    name: Website v2 tests
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website-v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+
+  extension:
+    name: Browser extension build
+    needs: changes
+    if: needs.changes.outputs.extension == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integratorDown
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run build:firefox
+
+  # 原生 Android：Kotlin 单测（含经 UniFFI 生成绑定的本机主机端到端冒烟）+ 组装 APK + lint。
+  # :bridge 经 cargo-ndk 交叉编译 integratordown_mobile；门禁只编 arm64-v8a 以控制时长。
+  # runner 须 ≥ ubuntu-24.04：install-action 下发的 cargo-ndk 预编译包要求 GLIBC 2.39（22.04 只有 2.35）；
+  # Android 产物不依赖宿主 glibc，无需像桌面 Linux 发行物那样锁 22.04 基线。
+  android:
+    name: Native Android (test + assemble + lint)
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mobile/Android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-android
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # NDK：runner 预装于 $ANDROID_HOME/ndk/<版本>，:bridge 自动取最高版本。
+      - name: Gradle test + assemble + lint
+        run: >-
+          ./gradlew --no-daemon -Pintegratordown.abis=arm64-v8a
+          :core:testDebugUnitTest :fluxui:testDebugUnitTest :bridge:testDebugUnitTest
+          :app:assembleDebug :app:lintDebug

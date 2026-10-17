@@ -1,0 +1,1446 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "",
+  "title": "IntegratorDown GPUI Theme",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "format": {
+      "const": "integratordown.gpui-theme"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 2
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "extends": {
+      "enum": [
+        "builtin:default",
+        "builtin:default-dark",
+        "builtin:default-light",
+        "builtin:midnight-blue",
+        "builtin:nord",
+        "builtin:warm-light"
+      ],
+      "default": "builtin:default"
+    },
+    "tokens": {
+      "$ref": "#/$defs/layer"
+    },
+    "dark": {
+      "$ref": "#/$defs/layer"
+    },
+    "light": {
+      "$ref": "#/$defs/layer"
+    }
+  },
+  "$defs": {
+    "layer": {
+      "type": "object",
+      "properties": {
+        "colors": {
+          "type": "object",
+          "properties": {
+            "background": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.background",
+              "x-integratordown-kind": "color"
+            },
+            "foreground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.foreground",
+              "x-integratordown-kind": "color"
+            },
+            "surface": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.surface",
+              "x-integratordown-kind": "color"
+            },
+            "surfaceForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.surfaceForeground",
+              "x-integratordown-kind": "color"
+            },
+            "primary": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.primary",
+              "x-integratordown-kind": "color"
+            },
+            "primaryForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.primaryForeground",
+              "x-integratordown-kind": "color"
+            },
+            "secondary": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.secondary",
+              "x-integratordown-kind": "color"
+            },
+            "secondaryForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.secondaryForeground",
+              "x-integratordown-kind": "color"
+            },
+            "muted": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.muted",
+              "x-integratordown-kind": "color"
+            },
+            "mutedForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.mutedForeground",
+              "x-integratordown-kind": "color"
+            },
+            "accent": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.accent",
+              "x-integratordown-kind": "color"
+            },
+            "accentForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.accentForeground",
+              "x-integratordown-kind": "color"
+            },
+            "destructive": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.destructive",
+              "x-integratordown-kind": "color"
+            },
+            "destructiveForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.destructiveForeground",
+              "x-integratordown-kind": "color"
+            },
+            "border": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.border",
+              "x-integratordown-kind": "color"
+            },
+            "input": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.input",
+              "x-integratordown-kind": "color"
+            },
+            "ring": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.ring",
+              "x-integratordown-kind": "color"
+            },
+            "success": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.success",
+              "x-integratordown-kind": "color"
+            },
+            "warning": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.warning",
+              "x-integratordown-kind": "color"
+            },
+            "info": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.info",
+              "x-integratordown-kind": "color"
+            },
+            "textTertiary": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.textTertiary",
+              "x-integratordown-kind": "color"
+            },
+            "hairline": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.hairline",
+              "x-integratordown-kind": "color"
+            },
+            "rowHover": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.rowHover",
+              "x-integratordown-kind": "color"
+            },
+            "chrome": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.chrome",
+              "x-integratordown-kind": "color"
+            },
+            "navHover": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.navHover",
+              "x-integratordown-kind": "color"
+            },
+            "navSelected": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.navSelected",
+              "x-integratordown-kind": "color"
+            },
+            "navSelectedForeground": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.navSelectedForeground",
+              "x-integratordown-kind": "color"
+            },
+            "navSelectedIcon": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.navSelectedIcon",
+              "x-integratordown-kind": "color"
+            },
+            "accentText": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.accentText",
+              "x-integratordown-kind": "color"
+            },
+            "caret": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.caret",
+              "x-integratordown-kind": "color"
+            },
+            "textSelection": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.textSelection",
+              "x-integratordown-kind": "color"
+            },
+            "dragBorder": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.dragBorder",
+              "x-integratordown-kind": "color"
+            },
+            "dropTarget": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.dropTarget",
+              "x-integratordown-kind": "color"
+            },
+            "statusDownloading": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.statusDownloading",
+              "x-integratordown-kind": "color"
+            },
+            "statusCompleted": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.statusCompleted",
+              "x-integratordown-kind": "color"
+            },
+            "statusFailed": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.statusFailed",
+              "x-integratordown-kind": "color"
+            },
+            "statusPaused": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.statusPaused",
+              "x-integratordown-kind": "color"
+            },
+            "statusQueued": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.statusQueued",
+              "x-integratordown-kind": "color"
+            },
+            "progressTrack": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.progressTrack",
+              "x-integratordown-kind": "color"
+            },
+            "progressFill": {
+              "$ref": "#/$defs/color",
+              "x-integratordown-token": "colors.progressFill",
+              "x-integratordown-kind": "color"
+            }
+          }
+        },
+        "radius": {
+          "type": "object",
+          "properties": {
+            "none": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "radius.none",
+              "x-integratordown-kind": "radius"
+            },
+            "sm": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "radius.sm",
+              "x-integratordown-kind": "radius"
+            },
+            "md": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "radius.md",
+              "x-integratordown-kind": "radius"
+            },
+            "lg": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "radius.lg",
+              "x-integratordown-kind": "radius"
+            },
+            "xl": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "radius.xl",
+              "x-integratordown-kind": "radius"
+            },
+            "full": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 9999
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "radius.full",
+              "x-integratordown-kind": "radius"
+            }
+          }
+        },
+        "spacing": {
+          "type": "object",
+          "properties": {
+            "xxs": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.xxs",
+              "x-integratordown-kind": "length"
+            },
+            "xs": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.xs",
+              "x-integratordown-kind": "length"
+            },
+            "sm": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.sm",
+              "x-integratordown-kind": "length"
+            },
+            "md": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.md",
+              "x-integratordown-kind": "length"
+            },
+            "lg": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.lg",
+              "x-integratordown-kind": "length"
+            },
+            "xl": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.xl",
+              "x-integratordown-kind": "length"
+            },
+            "xxl": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "spacing.xxl",
+              "x-integratordown-kind": "length"
+            }
+          }
+        },
+        "typography": {
+          "type": "object",
+          "properties": {
+            "sans": {
+              "type": "string",
+              "minLength": 1,
+              "x-integratordown-token": "typography.sans",
+              "x-integratordown-kind": "fontFamily"
+            },
+            "mono": {
+              "type": "string",
+              "minLength": 1,
+              "x-integratordown-token": "typography.mono",
+              "x-integratordown-kind": "fontFamily"
+            },
+            "xs": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.xs.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.xs.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.xs.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "sm": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.sm.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.sm.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.sm.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "md": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.md.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.md.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.md.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "lg": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.lg.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.lg.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.lg.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "xl": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.xl.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.xl.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.xl.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "monoMd": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.monoMd.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.monoMd.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.monoMd.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "caption": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.caption.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.caption.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.caption.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            },
+            "title": {
+              "type": "object",
+              "properties": {
+                "size": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 40
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.title.size",
+                  "x-integratordown-kind": "length"
+                },
+                "lineHeight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 8,
+                      "maximum": 96
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.title.lineHeight",
+                  "x-integratordown-kind": "length"
+                },
+                "weight": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 100,
+                      "maximum": 900
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "typography.title.weight",
+                  "x-integratordown-kind": "fontWeight"
+                }
+              }
+            }
+          }
+        },
+        "shadow": {
+          "type": "object",
+          "properties": {
+            "sm": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/shadowLayer"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "shadow.sm",
+              "x-integratordown-kind": "shadow"
+            },
+            "md": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/shadowLayer"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "shadow.md",
+              "x-integratordown-kind": "shadow"
+            },
+            "lg": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/shadowLayer"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "shadow.lg",
+              "x-integratordown-kind": "shadow"
+            }
+          }
+        },
+        "stroke": {
+          "type": "object",
+          "properties": {
+            "thin": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 4
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "stroke.thin",
+              "x-integratordown-kind": "length"
+            },
+            "strong": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 4
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "stroke.strong",
+              "x-integratordown-kind": "length"
+            }
+          }
+        },
+        "focusRing": {
+          "type": "object",
+          "properties": {
+            "width": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 4
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "focusRing.width",
+              "x-integratordown-kind": "length"
+            },
+            "offset": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 4
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "focusRing.offset",
+              "x-integratordown-kind": "length"
+            }
+          }
+        },
+        "icon": {
+          "type": "object",
+          "properties": {
+            "sm": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 8,
+                  "maximum": 32
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "icon.sm",
+              "x-integratordown-kind": "length"
+            },
+            "md": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 8,
+                  "maximum": 32
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "icon.md",
+              "x-integratordown-kind": "length"
+            },
+            "lg": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 8,
+                  "maximum": 32
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "icon.lg",
+              "x-integratordown-kind": "length"
+            }
+          }
+        },
+        "density": {
+          "type": "object",
+          "properties": {
+            "control": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.control",
+              "x-integratordown-kind": "length"
+            },
+            "navRow": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.navRow",
+              "x-integratordown-kind": "length"
+            },
+            "toolbarButton": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.toolbarButton",
+              "x-integratordown-kind": "length"
+            },
+            "titleBar": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.titleBar",
+              "x-integratordown-kind": "length"
+            },
+            "statusBar": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.statusBar",
+              "x-integratordown-kind": "length"
+            },
+            "statusControl": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.statusControl",
+              "x-integratordown-kind": "length"
+            },
+            "sectionHeader": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.sectionHeader",
+              "x-integratordown-kind": "length"
+            },
+            "taskRow": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.taskRow",
+              "x-integratordown-kind": "length"
+            },
+            "taskRowCompact": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.taskRowCompact",
+              "x-integratordown-kind": "length"
+            },
+            "checkMark": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 16,
+                  "maximum": 96
+                },
+                {
+                  "$ref": "#/$defs/ref"
+                }
+              ],
+              "x-integratordown-token": "density.checkMark",
+              "x-integratordown-kind": "length"
+            }
+          }
+        },
+        "components": {
+          "type": "object",
+          "properties": {
+            "button": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.button.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "input": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.input.radius",
+                  "x-integratordown-kind": "radius",
+                  "readOnly": true
+                }
+              }
+            },
+            "dialog": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.dialog.radius",
+                  "x-integratordown-kind": "radius",
+                  "readOnly": true
+                }
+              }
+            },
+            "card": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.card.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "badge": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.badge.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "navItem": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.navItem.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "progress": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.progress.radius",
+                  "x-integratordown-kind": "radius"
+                },
+                "height": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 1,
+                      "maximum": 16
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.progress.height",
+                  "x-integratordown-kind": "length"
+                }
+              }
+            },
+            "taskRow": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.taskRow.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "checkbox": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.checkbox.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "tab": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.tab.radius",
+                  "x-integratordown-kind": "radius"
+                }
+              }
+            },
+            "menu": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.menu.radius",
+                  "x-integratordown-kind": "radius",
+                  "readOnly": true
+                }
+              }
+            },
+            "tooltip": {
+              "type": "object",
+              "properties": {
+                "radius": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 9999
+                    },
+                    {
+                      "$ref": "#/$defs/ref"
+                    }
+                  ],
+                  "x-integratordown-token": "components.tooltip.radius",
+                  "x-integratordown-kind": "radius",
+                  "readOnly": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^(#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})|\\{[A-Za-z0-9]+(\\.[A-Za-z0-9]+)+\\}(/(100|[0-9]{1,2})(\\.[0-9]+)?)?)$"
+    },
+    "ref": {
+      "type": "string",
+      "pattern": "^\\{[A-Za-z0-9]+(\\.[A-Za-z0-9]+)+\\}$"
+    },
+    "shadowLayer": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "blur": {
+          "type": "number"
+        },
+        "spread": {
+          "type": "number"
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "inset": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

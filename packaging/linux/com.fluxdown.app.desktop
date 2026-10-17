@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=IntegratorDown
+GenericName=Download Manager
+Comment=Free IDM-alternative download manager
+Exec=integratordown-desktop %U
+Icon=com.integratordown.app
+Type=Application
+Categories=Network;FileTransfer;
+MimeType=application/x-bittorrent;x-scheme-handler/magnet;x-scheme-handler/integratordown;x-scheme-handler/ed2k;
+Keywords=download;manager;idm;torrent;magnet;ed2k;
+StartupWMClass=com.integratordown.app
+StartupNotify=true

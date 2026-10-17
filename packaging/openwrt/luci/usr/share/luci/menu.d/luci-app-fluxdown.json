@@ -1,0 +1,14 @@
+{
+	"admin/services/integratordown": {
+		"title": "IntegratorDown",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "integratordown"
+		},
+		"depends": {
+			"acl": [ "luci-app-integratordown" ],
+			"uci": { "integratordown": true }
+		}
+	}
+}

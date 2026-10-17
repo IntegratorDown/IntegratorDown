@@ -1,0 +1,135 @@
+# 把 release 资产同步到阿里云 OSS（release.yml 各 upload-<组件> job 共用）
+#
+# 对象布局与官网 website*/src/lib/oss.ts 的 releaseObjectKey 契约（改一处须同步另一处）：
+#   oss://<bucket>/<prefix>/<版本>/<组件>/<asset-name>
+# 目录由 GitHub Release 的 tag 推导：v0.4.8 → v0.4.8/app/（历史目录名；统一 release 起各组件
+# 都上传到这个 vX.Y.Z release，资产全部落在该目录，文件名互不重复）；历史组件 release
+# extension-v0.4.8 → v0.4.8/extension/，server-v… / cli-v… / mobile-v… 同理。
+# 官网 auto 优先 CDN 缓存、未命中回源 OSS、失败回退 GitHub；无 CDN 时才先预签名 HEAD 探测。
+# bucket 私有（开了「阻止公共访问」，对象不可 public-read），不要在这里设 ACL。
+# 存储键契约（website-v2/src/lib/oss-storage.ts 的 ossStorageKey，改一处须同步另一处）：
+# OSS 禁止经默认域名分发 .apk / .ipa（400 ApkDownloadForbidden），这两类对象在桶内追加 .bin；
+# 对外 URL 与文件名不变，由 CDN Worker / 官网预签名覆盖下载响应头。
+#
+# 凭据只走 secrets（OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET）；未配置时整步跳过，
+# 不阻断 GitHub Release（官网自动回退 GitHub 直连）。
+# dry-run=true（release.yml 演练）：推导目标目录并用同一条 ls 只读探活凭据与 bucket 权限，不上传。
+name: Upload release assets to OSS
+description: 用 ossutil 把 release-assets/ 上传到阿里云 OSS 的 <prefix>/<版本>/<组件>/ 下
+
+inputs:
+  tag:
+    description: 资产所属 GitHub Release 的 tag（决定 OSS 子目录）
+    required: true
+  dir:
+    description: 本地资产目录
+    required: false
+    default: release-assets
+  access-key-id:
+    description: RAM 用户 AccessKey ID（secrets.OSS_ACCESS_KEY_ID）
+    required: true
+  access-key-secret:
+    description: RAM 用户 AccessKey Secret（secrets.OSS_ACCESS_KEY_SECRET）
+    required: true
+  bucket:
+    description: OSS bucket
+    required: false
+    default: zerx-lab
+  prefix:
+    description: bucket 内根目录（无首尾斜杠）
+    required: false
+    default: IntegratorDownRelease
+  endpoint:
+    description: OSS endpoint
+    required: false
+    default: oss-cn-beijing.aliyuncs.com
+  region:
+    description: OSS region id
+    required: false
+    default: cn-beijing
+  dry-run:
+    description: "'true' = 只推导目标目录并只读列举，验证凭据，不上传"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # 固定版本直链（不用 install.sh：那会拉「最新版」，行为不可复现）
+    - name: Install ossutil
+      shell: bash
+      run: |
+        set -euo pipefail
+        V=2.3.0
+        curl -fsSL --retry 3 -o /tmp/ossutil.zip \
+          "https://gosspublic.alicdn.com/ossutil/v2/${V}/ossutil-${V}-linux-amd64.zip"
+        unzip -q -o /tmp/ossutil.zip -d /tmp/ossutil
+        sudo install -m 0755 "/tmp/ossutil/ossutil-${V}-linux-amd64/ossutil" /usr/local/bin/ossutil
+        ossutil version
+
+    - name: Upload to OSS
+      shell: bash
+      env:
+        OSS_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        OSS_ACCESS_KEY_SECRET: ${{ inputs.access-key-secret }}
+        TAG: ${{ inputs.tag }}
+        DIR: ${{ inputs.dir }}
+        BASE: oss://${{ inputs.bucket }}/${{ inputs.prefix }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        REGION: ${{ inputs.region }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+        if [ -z "$OSS_ACCESS_KEY_ID" ] || [ -z "$OSS_ACCESS_KEY_SECRET" ]; then
+          echo "⚠️  OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET not configured, skipping OSS upload"
+          exit 0
+        fi
+        case "$TAG" in
+          v*)   COMPONENT=app; VERSION=$TAG ;;
+          *-v*) COMPONENT=${TAG%%-v*}; VERSION=v${TAG#*-v} ;;
+          *)    echo "::error::invalid tag '$TAG'"; exit 1 ;;
+        esac
+        case "$TAG" in *[!A-Za-z0-9._-]*) echo "::error::invalid tag '$TAG'"; exit 1 ;; esac
+        DEST="$BASE/$VERSION/$COMPONENT/"
+        LOCAL_COUNT=$(find "$DIR" -maxdepth 1 -type f | wc -l)
+
+        if [ "$DRY_RUN" != "false" ]; then
+          # 与下方上传后校验同一条 ls（不吞错误）：鉴权 / 权限 / endpoint 有误即失败
+          LISTING=$(ossutil ls -e "$ENDPOINT" --region "$REGION" "$DEST" --short-format)
+          EXISTING=$(printf '%s\n' "$LISTING" | grep -c "^oss://" || true)
+          echo "🧪 dry-run: ${LOCAL_COUNT} file(s) from ${DIR}/ → ${DEST}（未上传）；OSS 凭据有效，目标现有 ${EXISTING} 个对象"
+          exit 0
+        fi
+
+        # 暂存目录（硬链接，失败则复制）：.apk / .ipa 改名为 <name>.bin，不改动原产物目录
+        STAGE=$(mktemp -d)
+        find "$DIR" -maxdepth 1 -type f -print0 | while IFS= read -r -d '' f; do
+          name=$(basename "$f")
+          case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
+            *.apk|*.ipa) name="$name.bin" ;;
+          esac
+          ln "$f" "$STAGE/$name" 2>/dev/null || cp "$f" "$STAGE/$name"
+        done
+
+        echo "Uploading ${LOCAL_COUNT} file(s) from ${DIR}/ → ${DEST}"
+
+        # -f 覆盖：workflow_dispatch 补跑同 tag 时以新产物为准
+        for i in 1 2 3; do
+          if ossutil cp -r -f \
+               -e "$ENDPOINT" --region "$REGION" \
+               "$STAGE/" "$DEST"; then
+            break
+          fi
+          if [ "$i" = 3 ]; then echo "::error::OSS upload failed after 3 attempts"; exit 1; fi
+          echo "⚠️  Attempt $i failed, retrying in 15s..."; sleep 15
+        done
+
+        # 校验：远端对象数不少于本地文件数
+        REMOTE_COUNT=$(ossutil ls -e "$ENDPOINT" --region "$REGION" "$DEST" --short-format 2>/dev/null \
+          | grep -c "^oss://" || true)
+        echo "Remote objects under ${DEST}: ${REMOTE_COUNT}"
+        if [ "$REMOTE_COUNT" -lt "$LOCAL_COUNT" ]; then
+          echo "::error::OSS verification failed: remote=${REMOTE_COUNT} < local=${LOCAL_COUNT}"
+          exit 1
+        fi
+        echo "✅ OSS upload complete: ${DEST}"

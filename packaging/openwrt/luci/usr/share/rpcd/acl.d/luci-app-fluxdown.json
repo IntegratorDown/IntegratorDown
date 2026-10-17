@@ -1,0 +1,17 @@
+{
+	"luci-app-integratordown": {
+		"description": "Grant access to IntegratorDown configuration",
+		"read": {
+			"uci": [ "integratordown" ],
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"file": {
+				"/usr/libexec/integratordown/luci-token": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "integratordown" ]
+		}
+	}
+}

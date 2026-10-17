@@ -1,0 +1,912 @@
+//! IntegratorDown Native Messaging Host (NMH) relay binary.
+//!
+//! Chrome/Edge/Firefox launches this process when the browser extension calls
+//! `chrome.runtime.connectNative("com.integratordown.nmh")`.
+//!
+//! Communication flow:
+//!   Browser extension <-(stdin/stdout, 4-byte LE length + JSON)-> this process
+//!   this process <-(Named Pipe, 4-byte LE length + JSON)-> IntegratorDown App
+//!
+//! Design:
+//!   - Synchronous, single-threaded, no async runtime.
+//!   - Pipe connection is lazy: established on first message, reconnected on error.
+//!   - When the IntegratorDown App is not running, NMH automatically launches it and
+//!     polls for the IPC endpoint at a fixed 50ms interval (up to 10s).
+//!   - The "no-launch" action set (see `NO_LAUNCH_ACTIONS`) — "ping" plus the
+//!     task-panel query/control actions — only checks connectivity and never
+//!     launches the App.
+//!   - "warmup" messages ensure the App is running and the pipe is connected,
+//!     then are answered locally (never forwarded to the App). The extension
+//!     sends one at download-flow entry so App cold-start overlaps with its
+//!     cookie collection instead of running after it.
+//!   - Diagnostic log is written to `%TEMP%/integratordown_nmh.log`.
+//!   - Message size limit: 1 MB (Chrome NMH hard limit).
+
+#![forbid(unsafe_code)]
+
+use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+/// Product version: the release pipeline injects the tag version through `INTEGRATORDOWN_APP_VERSION`;
+/// local builds fall back to this crate's version. Same rule as `integratordown_protocol::APP_VERSION`
+/// (this relay deliberately has no dependency on the protocol crate).
+const APP_VERSION: &str = match option_env!("INTEGRATORDOWN_APP_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
+/// Maximum message size: 1 MB (Chrome NMH limit).
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+
+/// Actions the NMH relay answers/forwards without auto-launching the App
+/// when it isn't already running — mirrors the shared NMH contract's
+/// no-launch action set. `ping` is a pure liveness check; the task-panel
+/// query/control actions target an already-running App, so failing fast
+/// beats a multi-second cold-start stall for a popup that has nothing to
+/// show anyway. `download`/`warmup` are deliberately excluded — those are
+/// the entry points that must launch the App.
+const NO_LAUNCH_ACTIONS: &[&str] = &[
+    "ping",
+    "tasks",
+    "task_op",
+    "open_file",
+    "reveal_file",
+    "capabilities",
+    "capture_status",
+    "sniff_rules",
+];
+
+/// Whether `action` belongs to [`NO_LAUNCH_ACTIONS`].
+fn is_no_launch_action(action: &str) -> bool {
+    NO_LAUNCH_ACTIONS.contains(&action)
+}
+
+/// Unix IPC socket: `<data dir>/ipc/integratordown.sock`, where `ipc` is a per-user 0700 directory
+/// created by the agent. The data dir is under the user's home on purpose: it is reachable
+/// from both the host and Flatpak/Snap sandboxes (unlike `$XDG_RUNTIME_DIR`). The agent
+/// (`native/agent/src/nmh.rs`) derives the same path; keep both in lockstep.
+#[cfg(any(not(windows), test))]
+fn socket_path_under(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let data_dir = home
+        .join("Library")
+        .join("Application Support")
+        .join("integratordown");
+    #[cfg(not(target_os = "macos"))]
+    let data_dir = home.join(".local").join("share").join("integratordown");
+    data_dir.join("ipc").join("integratordown.sock")
+}
+
+/// Windows Named Pipe for the current account: `\\.\pipe\integratordown-<account>`. Every byte of
+/// the lower-cased account name outside `[a-z0-9]` is encoded as `_xx` (the underscore is
+/// itself encoded), so distinct accounts never share a pipe. The agent
+/// (`native/agent/src/nmh.rs`) derives the same name; keep both in lockstep.
+#[cfg(any(windows, test))]
+fn pipe_name_for(user: &str) -> Option<String> {
+    if user.is_empty() {
+        return None;
+    }
+    let mut name = String::from(r"\\.\pipe\integratordown-");
+    for byte in user.to_lowercase().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    Some(name)
+}
+
+/// Cold-launch candidates, in priority order, searched next to the NMH
+/// binary. Only `integratordown-agent` (GPUI stack) is launched.
+#[cfg(windows)]
+const APP_EXE_CANDIDATES: &[&str] = &["integratordown-agent.exe"];
+#[cfg(not(windows))]
+const APP_EXE_CANDIDATES: &[&str] = &["integratordown-agent"];
+
+/// Maximum time (ms) to wait for the App to start and create its pipe.
+const APP_LAUNCH_TIMEOUT_MS: u64 = 10_000;
+
+/// Polling interval (ms) while waiting for the App's IPC endpoint after
+/// launching it. Fixed and short: connecting to a nonexistent local pipe or
+/// socket fails in microseconds, so tight polling is essentially free —
+/// exponential back-off would quantize the observed connect latency to its
+/// checkpoint times (measured: endpoint ready in ~300-700ms, but back-off
+/// checkpoints at 700/1500ms wasted up to ~800ms per cold start).
+const PIPE_POLL_INTERVAL_MS: u64 = 50;
+
+/// Minimum cooldown (ms) between two App launch attempts.
+/// Prevents crash-loops if the App crashes on start.
+const APP_LAUNCH_COOLDOWN_MS: u64 = 15_000;
+
+/// Incoming message from the browser extension.
+#[derive(Debug, Deserialize)]
+struct IncomingMessage {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    msg_id: u64,
+}
+
+/// Response sent back to the browser extension for messages the NMH answers
+/// locally: error replies and "warmup" acknowledgements.
+#[derive(Debug, Serialize)]
+struct HostResponse {
+    success: bool,
+    message: String,
+    msg_id: u64,
+}
+
+/// Serialize and write a locally-generated response to stdout.
+fn respond_status(success: bool, message: &str, msg_id: u64) -> io::Result<()> {
+    let resp = HostResponse {
+        success,
+        message: message.to_string(),
+        msg_id,
+    };
+    let json = serde_json::to_vec(&resp).map_err(io::Error::other)?;
+    write_stdout_message(&json)
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic logging (writes to %TEMP%/integratordown_nmh.log)
+// ---------------------------------------------------------------------------
+
+/// Resolve the NMH log file path.
+fn log_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("TEMP")
+            .or_else(|_| std::env::var("TMP"))
+            .ok()
+            .map(|tmp| Path::new(&tmp).join("integratordown_nmh.log"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, Chrome launches NMH via launchd which may not set $HOME.
+        // Use home_dir() which falls back to getpwuid when $HOME is absent.
+        if let Some(home) = home_dir() {
+            let dir = home
+                .join("Library")
+                .join("Application Support")
+                .join("integratordown");
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                eprintln!("integratordown_nmh: cannot create log directory: {error}");
+                return None;
+            }
+            return Some(dir.join("integratordown_nmh.log"));
+        }
+        Some(Path::new("/tmp").join("integratordown_nmh.log"))
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        // Linux: use ~/.local/share/integratordown/integratordown_nmh.log
+        // Consistent with socket_path() — avoids $XDG_RUNTIME_DIR which gets
+        // remapped inside Flatpak/Snap sandboxes and may differ between the app
+        // process (host) and the NMH process (launched by sandboxed browser).
+        if let Some(home) = home_dir() {
+            let dir = home.join(".local").join("share").join("integratordown");
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                eprintln!("integratordown_nmh: cannot create log directory: {error}");
+                return None;
+            }
+            return Some(dir.join("integratordown_nmh.log"));
+        }
+        Some(Path::new("/tmp").join("integratordown_nmh.log"))
+    }
+}
+
+/// Append a timestamped line to the NMH log file.
+/// Failures go to stderr, never back into this logger or the stdout wire.
+fn log(msg: &str) {
+    let Some(path) = log_path() else {
+        return;
+    };
+    let mut f = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("integratordown_nmh: cannot open log file: {error}");
+            return;
+        }
+    };
+    match f.metadata() {
+        Ok(meta) if meta.len() > 256 * 1024 => {
+            if let Err(error) = f.set_len(0) {
+                eprintln!("integratordown_nmh: cannot truncate log file: {error}");
+                return;
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("integratordown_nmh: cannot inspect log file: {error}");
+            return;
+        }
+    }
+    let now = chrono_free_timestamp();
+    if let Err(error) = writeln!(f, "[{now}] {msg}") {
+        eprintln!("integratordown_nmh: cannot write log file: {error}");
+    }
+}
+
+/// Simple timestamp without pulling in chrono — "YYYY-MM-DD HH:MM:SS".
+fn chrono_free_timestamp() -> String {
+    // Use std::time for elapsed since NMH start; not wall-clock but cheap.
+    // For wall-clock we'd need `chrono` or Win32 GetLocalTime. Keep it simple.
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs();
+    // UTC is fine for diagnostics; avoids timezone complexity.
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+// ---------------------------------------------------------------------------
+// Home directory resolution (macOS: std passwd fallback for launchd env)
+// ---------------------------------------------------------------------------
+
+/// Returns the current user's home directory.
+///
+/// On macOS, Chrome/Firefox launch the NMH process via launchd, which may
+/// strip $HOME from the environment. The standard library falls back to the
+/// passwd database and preserves non-UTF-8 filesystem paths.
+#[cfg(target_os = "macos")]
+fn home_dir() -> Option<PathBuf> {
+    std::env::home_dir().filter(|home| !home.as_os_str().is_empty())
+}
+
+/// Returns the current user's home directory on Linux.
+///
+/// On Linux, Chrome launches the NMH process directly (not via a session
+/// manager that strips environment variables), so $HOME is reliably set.
+/// This mirrors the macOS version's signature so pipe::socket_path() can
+/// call super::home_dir() uniformly on both platforms.
+#[cfg(target_os = "linux")]
+fn home_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// stdin/stdout helpers (4-byte LE length-prefixed JSON, per NMH protocol)
+// ---------------------------------------------------------------------------
+
+/// Read one NMH message from stdin.
+/// Returns `None` on EOF (extension disconnected).
+fn read_stdin_message() -> Option<Vec<u8>> {
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+
+    let mut len_buf = [0u8; 4];
+    if handle.read_exact(&mut len_buf).is_err() {
+        return None;
+    }
+    let len = u32::from_le_bytes(len_buf);
+    if len == 0 || len > MAX_MESSAGE_SIZE {
+        return None;
+    }
+
+    let mut buf = vec![0u8; len as usize];
+    if handle.read_exact(&mut buf).is_err() {
+        return None;
+    }
+    Some(buf)
+}
+
+/// Write one NMH message to stdout.
+fn write_stdout_message(data: &[u8]) -> io::Result<()> {
+    let stdout = io::stdout();
+    write_message_frame(&mut stdout.lock(), data)
+}
+
+fn write_message_frame(writer: &mut impl Write, data: &[u8]) -> io::Result<()> {
+    let len = u32::try_from(data.len()).map_err(io::Error::other)?;
+    if len > MAX_MESSAGE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message too large",
+        ));
+    }
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(data)?;
+    writer.flush()
+}
+
+// ---------------------------------------------------------------------------
+// Named Pipe helpers (Windows)
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod pipe {
+    use std::fs::OpenOptions;
+    use std::io::{self, Read, Write};
+
+    pub struct PipeHandle {
+        file: std::fs::File,
+    }
+
+    impl PipeHandle {
+        pub fn connect(pipe_name: &str) -> Option<Self> {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(pipe_name)
+                .ok()?;
+            Some(PipeHandle { file })
+        }
+
+        pub fn write_message(&mut self, data: &[u8]) -> io::Result<()> {
+            let len = data.len() as u32;
+            self.file.write_all(&len.to_le_bytes())?;
+            self.file.write_all(data)?;
+            // NOTE: flush() is intentionally omitted.
+            // On Windows Named Pipes, File::flush() calls FlushFileBuffers(), which
+            // BLOCKS until the remote end reads all data. If the Tokio async server
+            // hasn't scheduled its read yet, this deadlocks for ~17 seconds until
+            // Windows aborts the I/O. Named pipe writes go to the kernel buffer
+            // immediately — no explicit flush is needed.
+            Ok(())
+        }
+
+        pub fn read_message(&mut self) -> io::Result<Vec<u8>> {
+            let mut len_buf = [0u8; 4];
+            self.file.read_exact(&mut len_buf)?;
+            let len = u32::from_le_bytes(len_buf);
+            if len > super::MAX_MESSAGE_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "message too large",
+                ));
+            }
+            let mut buf = vec![0u8; len as usize];
+            self.file.read_exact(&mut buf)?;
+            Ok(buf)
+        }
+    }
+}
+
+// Non-Windows: connect to IntegratorDown via Unix Domain Socket.
+#[cfg(not(windows))]
+mod pipe {
+    use std::io::{self, Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    /// Resolve the per-user Unix socket path the IntegratorDown agent listens on. There is no
+    /// shared-directory fallback: without a home directory the endpoint is unavailable.
+    fn socket_path() -> Option<std::path::PathBuf> {
+        super::home_dir().map(|home| super::socket_path_under(&home))
+    }
+
+    pub struct PipeHandle {
+        stream: UnixStream,
+    }
+
+    impl PipeHandle {
+        /// Connect to the IntegratorDown Unix socket. Returns None if the app is not running.
+        pub fn connect(_ignored: &str) -> Option<Self> {
+            let path = socket_path()?;
+            let stream = UnixStream::connect(&path).ok()?;
+            Some(PipeHandle { stream })
+        }
+
+        pub fn write_message(&mut self, data: &[u8]) -> io::Result<()> {
+            let len = data.len() as u32;
+            self.stream.write_all(&len.to_le_bytes())?;
+            self.stream.write_all(data)?;
+            self.stream.flush()?;
+            Ok(())
+        }
+
+        pub fn read_message(&mut self) -> io::Result<Vec<u8>> {
+            let mut len_buf = [0u8; 4];
+            self.stream.read_exact(&mut len_buf)?;
+            let len = u32::from_le_bytes(len_buf);
+            if len > super::MAX_MESSAGE_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "message too large",
+                ));
+            }
+            let mut buf = vec![0u8; len as usize];
+            self.stream.read_exact(&mut buf)?;
+            Ok(buf)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App auto-launch
+// ---------------------------------------------------------------------------
+
+/// Find the IntegratorDown App executable.
+///
+/// Search order:
+/// 1. Same directory as the NMH binary, following [`APP_EXE_CANDIDATES`]
+/// 2. Cargo output for `integratordown-agent` (development fallback)
+fn find_app_exe() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && let Some(found) = first_existing(dir, APP_EXE_CANDIDATES)
+    {
+        return Some(found);
+    }
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|path| path.parent())?;
+
+    ["debug", "release"].iter().find_map(|profile| {
+        let dir = workspace_root.join("target").join(profile);
+        first_existing(&dir, APP_EXE_CANDIDATES)
+    })
+}
+
+/// First `names` entry that exists inside `dir`.
+fn first_existing(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    names.iter().map(|name| dir.join(name)).find(|p| p.exists())
+}
+
+/// Launch the IntegratorDown App as a detached process.
+#[cfg(windows)]
+fn launch_app(app_exe: &Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    // Firefox 把 NMH 放进会在 NMH 退出时终止整个 Job 的 Job object；
+    // 不脱离则冷启动的 agent / daemon 会随 NMH 一起被杀。
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+
+    let spawn = |flags: u32| {
+        std::process::Command::new(app_exe)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    let base = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    match spawn(base | CREATE_BREAKAWAY_FROM_JOB) {
+        Ok(_) => true,
+        // 所在 Job 不允许脱离（Chrome / 企业策略 / 沙箱）：退化为随浏览器生命周期。
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            log("launch: job does not allow breakaway; app will follow the browser's job lifetime");
+            spawn(base).is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_app(app_exe: &Path) -> bool {
+    std::process::Command::new(app_exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// Returns the IPC address string for `pipe::PipeHandle::connect()`.
+/// On Windows this is the per-user Named Pipe path (empty when the account name is
+/// unavailable, which makes every connect fail); on non-Windows the argument is ignored
+/// and the Unix socket path is resolved inside the `pipe` module.
+fn ipc_address() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("USERNAME")
+            .ok()
+            .and_then(|user| pipe_name_for(&user))
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
+/// Try to connect to the IPC endpoint. If unavailable, launch the App
+/// (subject to cooldown) and poll at a fixed 50ms interval until the
+/// endpoint appears or the timeout is reached.
+fn connect_with_auto_launch(last_launch: &mut Option<Instant>) -> Option<pipe::PipeHandle> {
+    let addr = ipc_address();
+
+    // Fast path: App is already running.
+    if let Some(p) = pipe::PipeHandle::connect(&addr) {
+        log("ipc connected (fast path)");
+        return Some(p);
+    }
+
+    // Cooldown: don't re-launch too quickly (prevents crash-loop).
+    if let Some(prev) = last_launch
+        && prev.elapsed().as_millis() < APP_LAUNCH_COOLDOWN_MS as u128
+    {
+        log("launch skipped: cooldown active");
+        return None;
+    }
+
+    // Find and launch the App.
+    let app_exe = match find_app_exe() {
+        Some(p) => p,
+        None => {
+            log("App exe not found");
+            return None;
+        }
+    };
+
+    log(&format!("launching App: {}", app_exe.display()));
+    if !launch_app(&app_exe) {
+        log("App launch failed (spawn error)");
+        return None;
+    }
+    *last_launch = Some(Instant::now());
+
+    // Poll at a fixed short interval, attempting to connect immediately:
+    // a failed connect to a local pipe/socket costs microseconds, while any
+    // sleep-first back-off adds its full interval to every cold start.
+    let deadline = Instant::now() + std::time::Duration::from_millis(APP_LAUNCH_TIMEOUT_MS);
+
+    loop {
+        if let Some(p) = pipe::PipeHandle::connect(&addr) {
+            let elapsed = last_launch.map_or(0, |t| t.elapsed().as_millis() as u64);
+            log(&format!("ipc connected after {}ms", elapsed));
+            return Some(p);
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(PIPE_POLL_INTERVAL_MS));
+    }
+
+    log("ipc connect timed out after launch");
+    None
+}
+
+/// Reconnect after a write failure and resend the frame once.
+///
+/// A write failure means the kernel never accepted the frame, so the App
+/// cannot have processed it — resending is duplicate-safe. The common cause
+/// is a stale pipe handle after the App restarted; without this, the
+/// extension pays a full port-teardown → new-NMH → ping → resend round-trip
+/// (~0.5-1s) for the first download after every App restart.
+///
+/// No-launch actions (see [`NO_LAUNCH_ACTIONS`]) reconnect without launching
+/// the App (liveness/query checks must not have side effects); everything
+/// else goes through auto-launch.
+fn reconnect_and_resend(
+    raw: &[u8],
+    is_no_launch: bool,
+    last_launch: &mut Option<Instant>,
+) -> Option<pipe::PipeHandle> {
+    let mut p = if is_no_launch {
+        pipe::PipeHandle::connect(&ipc_address())?
+    } else {
+        connect_with_auto_launch(last_launch)?
+    };
+    match p.write_message(raw) {
+        Ok(()) => {
+            log("reconnected and resent after write failure");
+            Some(p)
+        }
+        Err(e) => {
+            log(&format!("resend after reconnect failed ({})", e));
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+/// Answer for a direct command-line invocation (bare argv or
+/// `--help`/`--version`); `None` when launched by a browser.
+#[derive(Debug, PartialEq, Eq)]
+enum CliAction {
+    Version,
+    Help,
+}
+
+/// Classify a direct command-line invocation (`args` = argv without the
+/// program name).
+///
+/// Package-manager validation pipelines (winget's installer validation runs
+/// every installed exe with `--help`/`--version`) and curious humans expect a
+/// prompt exit; the relay loop would otherwise block forever reading console
+/// stdin. A browser launch always passes at least one positional argument
+/// (Chrome/Edge: the extension origin; Firefox: manifest path + extension
+/// id; the Linux/macOS wrapper script forwards `"$@"`), so an empty argv is
+/// also treated as a human invocation.
+fn classify_cli_invocation<S: AsRef<str>>(args: &[S]) -> Option<CliAction> {
+    if args
+        .iter()
+        .any(|a| matches!(a.as_ref(), "--version" | "-V"))
+    {
+        return Some(CliAction::Version);
+    }
+    if args.is_empty() || args.iter().any(|a| matches!(a.as_ref(), "--help" | "-h")) {
+        return Some(CliAction::Help);
+    }
+    None
+}
+
+fn main() {
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(action) = classify_cli_invocation(&cli_args) {
+        match action {
+            CliAction::Version => println!("integratordown_nmh {APP_VERSION}"),
+            CliAction::Help => println!(
+                "integratordown_nmh {} — IntegratorDown Native Messaging Host\n\
+                 \n\
+                 Relays messages between a browser extension (stdin/stdout)\n\
+                 and the IntegratorDown app (named pipe / unix socket). Launched\n\
+                 by the browser via Native Messaging; not meant to be run\n\
+                 directly.\n\
+                 \n\
+                 Options:\n\
+                 \x20 -h, --help       Show this help and exit\n\
+                 \x20 -V, --version    Show version and exit",
+                APP_VERSION
+            ),
+        }
+        return;
+    }
+
+    if let Err(error) = relay() {
+        log(&format!("NMH stdout failed; stopping relay: {error}"));
+        eprintln!("integratordown_nmh: relay failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn relay() -> io::Result<()> {
+    log("NMH started");
+    let mut pipe: Option<pipe::PipeHandle> = None;
+    let mut last_launch: Option<Instant> = None;
+
+    while let Some(raw) = read_stdin_message() {
+        let parsed = serde_json::from_slice::<IncomingMessage>(&raw);
+        let msg_id = parsed.as_ref().map_or(0, |m| m.msg_id);
+        let action = parsed.as_ref().map_or("", |m| m.action.as_str());
+        let is_no_launch = is_no_launch_action(action);
+
+        // Ensure IPC connection.
+        // No-launch actions only do a direct connect (no App launch for
+        // status/query checks).
+        if pipe.is_none() {
+            pipe = if is_no_launch {
+                pipe::PipeHandle::connect(&ipc_address())
+            } else {
+                connect_with_auto_launch(&mut last_launch)
+            };
+        }
+
+        // "warmup" is answered locally — its only job is to get the App
+        // launched and the pipe connected as early as possible. Never
+        // forwarded to the App, so the App-side protocol is untouched.
+        // NOTE: a cached handle may be stale (App restarted); warmup does
+        // not probe it. The next real message self-heals via
+        // reconnect_and_resend, so an optimistic "warmed" costs nothing.
+        if action == "warmup" {
+            if pipe.is_some() {
+                respond_status(true, "warmed", msg_id)?;
+            } else {
+                respond_status(false, "app_not_running", msg_id)?;
+            }
+            continue;
+        }
+
+        // Take the handle out; it is put back only if this message's
+        // write/read round-trip proves the connection healthy.
+        let mut p = match pipe.take() {
+            Some(p) => p,
+            None => {
+                respond_status(false, "app_not_running", msg_id)?;
+                continue;
+            }
+        };
+
+        // Forward message to App. On write failure, reconnect and resend
+        // once in-process instead of bouncing the error to the extension.
+        if let Err(e) = p.write_message(&raw) {
+            log(&format!("pipe write failed ({}), reconnecting", e));
+            drop(p);
+            match reconnect_and_resend(&raw, is_no_launch, &mut last_launch) {
+                Some(fresh) => p = fresh,
+                None => {
+                    respond_status(false, "app_not_running", msg_id)?;
+                    continue;
+                }
+            }
+        }
+
+        // Read response from App.
+        match p.read_message() {
+            Ok(response_data) => {
+                write_stdout_message(&response_data)?;
+                pipe = Some(p);
+            }
+            Err(e) => {
+                log(&format!("pipe read failed ({}), dropping connection", e));
+                respond_status(false, "app_not_running", msg_id)?;
+            }
+        }
+    }
+
+    log("NMH exiting (stdin closed)");
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_launch_set_covers_ping_and_task_panel_actions() {
+        for action in [
+            "ping",
+            "tasks",
+            "task_op",
+            "open_file",
+            "reveal_file",
+            "capabilities",
+            "capture_status",
+            "sniff_rules",
+        ] {
+            assert!(is_no_launch_action(action), "{action} should be no-launch");
+        }
+    }
+
+    #[test]
+    fn no_launch_set_excludes_launch_triggering_actions() {
+        for action in ["download", "warmup", "unknown", ""] {
+            assert!(
+                !is_no_launch_action(action),
+                "{action} must still auto-launch the App"
+            );
+        }
+    }
+
+    /// Must stay in lockstep with `native/agent/src/nmh.rs` (`socket_path_under`): the agent
+    /// and this relay derive the endpoint independently, both tests pin the same literals.
+    #[test]
+    fn unix_socket_lives_in_a_private_per_user_ipc_dir() {
+        #[cfg(target_os = "macos")]
+        let expected = "/Users/alice/Library/Application Support/integratordown/ipc/integratordown.sock";
+        #[cfg(not(target_os = "macos"))]
+        let expected = "/home/alice/.local/share/integratordown/ipc/integratordown.sock";
+        let home = if cfg!(target_os = "macos") {
+            "/Users/alice"
+        } else {
+            "/home/alice"
+        };
+        assert_eq!(
+            socket_path_under(Path::new(home)),
+            Path::new(expected).to_path_buf()
+        );
+    }
+
+    /// Same literals as `native/agent/src/nmh.rs` (`pipe_name_for`).
+    #[test]
+    fn pipe_name_is_per_user_and_injective() {
+        assert_eq!(
+            pipe_name_for("Alice Smith").as_deref(),
+            Some(r"\\.\pipe\integratordown-alice_20smith")
+        );
+        assert_eq!(
+            pipe_name_for("a_b"),
+            Some(r"\\.\pipe\integratordown-a_5fb".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("a b"),
+            Some(r"\\.\pipe\integratordown-a_20b".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("张三").as_deref(),
+            Some(r"\\.\pipe\integratordown-_e5_bc_a0_e4_b8_89")
+        );
+        assert_eq!(pipe_name_for(""), None);
+        assert_ne!(pipe_name_for("alice"), pipe_name_for("bob"));
+        // Windows account names are case-insensitive.
+        assert_eq!(pipe_name_for("ALICE"), pipe_name_for("alice"));
+    }
+
+    #[test]
+    fn cli_invocation_exits_for_bare_help_and_version() {
+        assert_eq!(classify_cli_invocation::<&str>(&[]), Some(CliAction::Help));
+        assert_eq!(classify_cli_invocation(&["--help"]), Some(CliAction::Help));
+        assert_eq!(classify_cli_invocation(&["-h"]), Some(CliAction::Help));
+        assert_eq!(
+            classify_cli_invocation(&["--version"]),
+            Some(CliAction::Version)
+        );
+        assert_eq!(classify_cli_invocation(&["-V"]), Some(CliAction::Version));
+    }
+
+    #[test]
+    fn cli_invocation_falls_through_for_browser_launch_args() {
+        // Chrome/Edge pass the extension origin (plus --parent-window on
+        // Windows); Firefox passes the manifest path and extension id. All
+        // must reach the relay loop.
+        assert_eq!(
+            classify_cli_invocation(&["chrome-extension://meleenglfggcmcajknpeeeiobnpfmahc/"]),
+            None
+        );
+        assert_eq!(
+            classify_cli_invocation(&[
+                "chrome-extension://meleenglfggcmcajknpeeeiobnpfmahc/",
+                "--parent-window=12345"
+            ]),
+            None
+        );
+        assert_eq!(
+            classify_cli_invocation(&["/path/to/com.integratordown.nmh.json", "integratordown@example.com"]),
+            None
+        );
+    }
+    #[cfg(test)]
+    mod frame_failure_tests {
+        use super::*;
+
+        struct FailingWriter {
+            fail_at: usize,
+            operations: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for FailingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.operations += 1;
+                if self.operations == self.fail_at {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.operations += 1;
+                if self.operations == self.fail_at {
+                    Err(io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        #[test]
+        fn frame_stops_at_header_payload_or_flush_failure() {
+            for fail_at in 1..=3 {
+                let mut writer = FailingWriter {
+                    fail_at,
+                    operations: 0,
+                    bytes: Vec::new(),
+                };
+                let error = write_message_frame(&mut writer, b"{}").expect_err("frame must fail");
+                assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+                assert_eq!(writer.operations, fail_at, "no operation after failure");
+                let expected: &[u8] = match fail_at {
+                    1 => b"",
+                    2 => &[2, 0, 0, 0],
+                    _ => &[2, 0, 0, 0, b'{', b'}'],
+                };
+                assert_eq!(writer.bytes, expected);
+            }
+        }
+    }
+}

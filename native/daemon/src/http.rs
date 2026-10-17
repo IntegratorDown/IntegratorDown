@@ -1,0 +1,541 @@
+//! loopback-only daemon HTTP 与鉴权 WebSocket 传输。
+
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::{Path as AxumPath, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use integratordown_protocol::{CLOSE_REASON_SERVICE_QUIT, EventFrame, RpcNotification, RpcResponse};
+use futures_util::StreamExt;
+use tokio::net::TcpListener;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
+use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::blob_store::BlobKind;
+use crate::rpc::{DaemonAuth, MAX_SLOW_CALLS, RpcSession, SessionReply, SlowCalls, Step};
+use crate::service::DaemonService;
+
+const REQUEST_BODY_LIMIT: usize = 4 * 1024 * 1024;
+/// WebSocket 单条消息上限：握手前任何对端都能发帧，不能沿用库默认的 64 MiB。
+const WS_MESSAGE_LIMIT: usize = 16 * 1024 * 1024;
+/// 握手帧只有几百字节；认证前超过该长度的帧直接断开。
+const PRE_AUTH_FRAME_LIMIT: usize = 4 * 1024;
+/// 握手必须在该时限内完成，未认证连接不得长期占着名额。
+const AUTH_DEADLINE: Duration = Duration::from_secs(10);
+/// 同时处于握手阶段（尚未认证）的连接上限。
+const MAX_PENDING_AUTH: usize = 16;
+
+#[derive(Clone)]
+struct HttpState {
+    service: Arc<DaemonService>,
+    auth: Arc<DaemonAuth>,
+    cancel: CancellationToken,
+    /// 由 `system.shutdown` 触发的退出：各连接以 [`CLOSE_REASON_SERVICE_QUIT`] 关闭。
+    quit_requested: Arc<AtomicBool>,
+    pending_auth: Arc<Semaphore>,
+}
+
+/// 启动 daemon HTTP 服务直到取消或 listener 失败。
+///
+/// `token` 是 agent 与 daemon 共享的长期密钥：新版 agent 只用它做 WebSocket 握手证明、
+/// HTTP 端点用已握手会话派生出的凭据；旧版 agent 的静态 Bearer 仍被接受（见 [`DaemonAuth`]）。
+pub async fn serve(
+    listener: TcpListener,
+    service: Arc<DaemonService>,
+    token: String,
+    cancel: CancellationToken,
+) -> Result<(), std::io::Error> {
+    let state = HttpState {
+        service,
+        auth: Arc::new(DaemonAuth::new(token)),
+        cancel: cancel.clone(),
+        quit_requested: Arc::new(AtomicBool::new(false)),
+        pending_auth: Arc::new(Semaphore::new(MAX_PENDING_AUTH)),
+    };
+    let app = Router::new()
+        .route("/rpc", get(rpc_upgrade))
+        .route("/files/tasks/{task_id}", get(download_task_file))
+        .route("/blobs/torrents", post(upload_torrent))
+        .route("/blobs/plugins", post(upload_plugin))
+        .route("/exports/{export_id}", get(download_export))
+        .layer(axum::extract::DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
+        .with_state(state);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(cancel.cancelled_owned())
+        .await
+}
+
+/// 加载或创建 daemon token 文件。
+pub async fn load_or_create_token(
+    data_dir: &Path,
+    override_path: Option<&Path>,
+) -> Result<String, std::io::Error> {
+    let path = override_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.join("daemon.token"));
+    if let Ok(existing) = tokio::fs::read_to_string(&path).await {
+        let token = existing.trim();
+        if !token.is_empty() {
+            // 便携模式下旧版本创建的 token 可能仍继承宽松 ACL，每次启动重新收紧。
+            if let Err(error) = set_private_file_permissions(&path).await {
+                tracing::warn!(error = %error, "failed to restrict daemon token permissions");
+            }
+            return Ok(token.to_owned());
+        }
+    }
+    let parent = path.parent().unwrap_or(data_dir);
+    tokio::fs::create_dir_all(parent).await?;
+    set_private_dir_permissions(parent).await?;
+    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let temp = temporary_path(&path);
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    let mut file = options.open(&temp).await?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(token.as_bytes()).await?;
+    file.write_all(b"\n").await?;
+    file.sync_all().await?;
+    drop(file);
+    set_private_file_permissions(&temp).await?;
+    tokio::fs::rename(&temp, &path).await?;
+    Ok(token)
+}
+
+/// 升级头不带凭据时，身份证明在升级后的 `system.auth.*` 握手里完成，握手通过之前连接只能走
+/// 握手帧。仍在升级头带静态 Bearer 的旧版 agent 只要 token 有效就直接视为已认证（无效 401）。
+async fn rpc_upgrade(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    // 浏览器页面发起的 WebSocket 必带 Origin，agent 客户端从不发送：拒绝跨站页面占握手名额。
+    if headers.contains_key(header::ORIGIN) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let (permit, bearer_authenticated) = if headers.contains_key(header::AUTHORIZATION) {
+        if !bearer_token(&headers).is_some_and(|presented| state.auth.accepts_token(presented)) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        (None, true)
+    } else {
+        let Ok(permit) = state.pending_auth.clone().try_acquire_owned() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        (Some(permit), false)
+    };
+    upgrade
+        .max_message_size(WS_MESSAGE_LIMIT)
+        .on_upgrade(move |socket| run_socket(socket, state, permit, bearer_authenticated))
+        .into_response()
+}
+
+async fn upload_torrent(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    upload_blob(&state, &headers, BlobKind::Torrent, body).await
+}
+
+async fn upload_plugin(State(state): State<HttpState>, headers: HeaderMap, body: Body) -> Response {
+    upload_blob(&state, &headers, BlobKind::Plugin, body).await
+}
+
+/// 先鉴权再读取请求体：未授权请求不会让 daemon 缓冲最多 4 MiB。
+async fn upload_blob(
+    state: &HttpState,
+    headers: &HeaderMap,
+    kind: BlobKind,
+    body: Body,
+) -> Response {
+    if !authorized(headers, &state.auth) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let body = match axum::body::to_bytes(body, REQUEST_BODY_LIMIT).await {
+        Ok(body) => body,
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    match state.service.blobs().put(kind, &body).await {
+        Ok(blob_id) => axum::Json(serde_json::json!({ "blobId": blob_id })).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("{error:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn download_task_file(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    if !authorized(&headers, &state.auth) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(task) = state.service.task(&task_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if task.status != 3 {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let path = PathBuf::from(&task.save_dir).join(&task.file_name);
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let metadata = match file.metadata().await {
+        Ok(metadata) => metadata,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    // 多文件 BT 任务落盘为目录；对目录 open 在 Unix 上会成功，但读取必然失败，
+    // 需在发出 200 头之前明确拒绝。
+    if !metadata.is_file() {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let length = metadata.len();
+    let disposition = attachment_disposition(&task.file_name);
+    match Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, length)
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .body(Body::from_stream(ReaderStream::new(file)))
+    {
+        Ok(response) => response,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `attachment` 头：ASCII 回退 `filename` + RFC 5987 `filename*`（UTF-8 百分号编码），
+/// 浏览器优先取后者，非 ASCII 文件名不再乱码。
+fn attachment_disposition(file_name: &str) -> String {
+    let fallback: String = file_name
+        .chars()
+        .map(|c| {
+            if (c.is_ascii_graphic() && !matches!(c, '"' | '\\' | '%')) || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::with_capacity(file_name.len());
+    for byte in file_name.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            )
+        {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
+async fn download_export(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(export_id): AxumPath<String>,
+) -> Response {
+    if !authorized(&headers, &state.auth) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let bytes = match state.service.blobs().read(&export_id, BlobKind::Logs).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    if state
+        .service
+        .blobs()
+        .consume(&export_id, BlobKind::Logs)
+        .await
+        .is_err()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    (StatusCode::OK, bytes).into_response()
+}
+
+/// 一条连接只有此循环写 socket。普通调用保持 FIFO，但等待 actor/DB 时仍推送事件；
+/// 慢调用沿用有界后台执行。不能把普通 create 改为慢方法，否则 agent 的独立通道会
+/// 破坏 create/pause 等命令的串行顺序。
+async fn run_socket(
+    mut socket: WebSocket,
+    state: HttpState,
+    mut auth_permit: Option<OwnedSemaphorePermit>,
+    bearer_authenticated: bool,
+) {
+    let HttpState {
+        service,
+        cancel,
+        quit_requested,
+        auth,
+        ..
+    } = state;
+    let mut session = RpcSession::new(service.clone(), auth, bearer_authenticated);
+    // 握手名额：认证通过即释放；期间受 `AUTH_DEADLINE` 约束。带有效静态 Bearer 升级的
+    // 旧版 agent 没有名额，也不受握手时限约束。
+    let auth_deadline = tokio::time::sleep(AUTH_DEADLINE);
+    tokio::pin!(auth_deadline);
+    let mut events = None;
+    let mut slow = SlowCalls::new(MAX_SLOW_CALLS);
+    let mut ordered = std::pin::pin!(None);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let reason = if quit_requested.load(Ordering::Acquire) {
+                    CLOSE_REASON_SERVICE_QUIT
+                } else {
+                    "daemon-shutdown"
+                };
+                if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
+                    code: 1001,
+                    reason: reason.into(),
+                }))).await {
+                    // 对端可能已经断开；关闭帧 best effort，不影响本地关闭。
+                    tracing::debug!(%error, close_code = 1001, "daemon WebSocket close frame was not delivered");
+                }
+                break;
+            }
+            _ = &mut auth_deadline, if auth_permit.is_some() => {
+                if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
+                    code: 1008,
+                    reason: "auth-timeout".into(),
+                }))).await {
+                    // 对端可能已经断开；关闭帧 best effort，不影响本地关闭。
+                    tracing::debug!(%error, close_code = 1008, "daemon WebSocket close frame was not delivered");
+                }
+                break;
+            }
+            incoming = socket.next(), if ordered.as_ref().get_ref().is_none() => {
+                let Some(Ok(message)) = incoming else { break; };
+                match message {
+                    Message::Text(text) => {
+                        if !session.is_authenticated() && text.len() > PRE_AUTH_FRAME_LIMIT {
+                            if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
+                                code: 1009,
+                                reason: "frame too large before authentication".into(),
+                            }))).await {
+                                // 对端可能已经断开；关闭帧 best effort，不影响本地关闭。
+                                tracing::debug!(%error, close_code = 1009, "daemon WebSocket close frame was not delivered");
+                            }
+                            break;
+                        }
+                        let reply = match session.accept(&text) {
+                            Step::Reply(reply) => reply,
+                            Step::Call(call) if call.is_slow() => {
+                                match slow.spawn(call.id(), call.run()) {
+                                    Ok(()) => continue,
+                                    Err(rejection) => SessionReply::reply(*rejection),
+                                }
+                            }
+                            Step::Call(call) => {
+                                ordered.as_mut().set(Some(call.run()));
+                                continue;
+                            }
+                        };
+                        if reply.became_ready {
+                            let (receiver, _) = service.events().subscribe_and_snapshot();
+                            events = Some(receiver);
+                        }
+                        if session.is_authenticated() {
+                            auth_permit = None;
+                        }
+                        let Ok(json) = serde_json::to_string(&reply.response) else { break; };
+                        if socket.send(Message::Text(json.into())).await.is_err() { break; }
+                        if reply.shutdown_requested {
+                            quit_requested.store(true, Ordering::Release);
+                            cancel.cancel();
+                        }
+                        if reply.close {
+                            if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
+                                code: 1008,
+                                reason: "unauthorized".into(),
+                            }))).await {
+                                // 对端可能已经断开；关闭帧 best effort，不影响本地关闭。
+                                tracing::debug!(%error, close_code = 1008, "daemon WebSocket close frame was not delivered");
+                            }
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Binary(_) => {
+                        if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
+                            code: 1003,
+                            reason: "text frames required".into(),
+                        }))).await {
+                            // 对端可能已经断开；关闭帧 best effort，不影响本地关闭。
+                            tracing::debug!(%error, close_code = 1003, "daemon WebSocket close frame was not delivered");
+                        }
+                        break;
+                    }
+                }
+            }
+            event = receive_event(&mut events), if events.is_some() => {
+                match event {
+                    Ok(frame) => {
+                        if send_event(&mut socket, frame).await.is_err() { break; }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
+                            code: 4009,
+                            reason: "event-gap".into(),
+                        }))).await {
+                            // 对端可能已经断开；关闭帧 best effort，不影响本地关闭。
+                            tracing::debug!(%error, close_code = 4009, "daemon WebSocket close frame was not delivered");
+                        }
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            response = receive_ordered(ordered.as_mut()), if ordered.as_ref().get_ref().is_some() => {
+                ordered.as_mut().set(None);
+                let Ok(json) = serde_json::to_string(&response) else { break; };
+                if socket.send(Message::Text(json.into())).await.is_err() { break; }
+            }
+            finished = slow.next(), if !slow.is_empty() => {
+                let Some(response) = finished else { continue; };
+                let Ok(json) = serde_json::to_string(&response) else { break; };
+                if socket.send(Message::Text(json.into())).await.is_err() { break; }
+            }
+        }
+    }
+    // 先中止在途调用，再释放连接所有权的选择订阅。
+    ordered.as_mut().set(None);
+    drop(slow);
+    session.disconnect();
+}
+
+async fn receive_ordered<F: Future<Output = RpcResponse>>(
+    call: Pin<&mut Option<F>>,
+) -> RpcResponse {
+    match call.as_pin_mut() {
+        Some(call) => call.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn receive_event(
+    receiver: &mut Option<broadcast::Receiver<EventFrame>>,
+) -> Result<EventFrame, broadcast::error::RecvError> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn send_event(socket: &mut WebSocket, frame: EventFrame) -> Result<(), ()> {
+    let params = serde_json::to_value(frame).map_err(|_| ())?;
+    let notification = RpcNotification::new(integratordown_protocol::method::SERVICE_EVENT, Some(params));
+    let json = serde_json::to_string(&notification).map_err(|_| ())?;
+    socket
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| ())
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+/// HTTP 端点的 `Authorization: Bearer`：某个存活会话的 HTTP 凭据，或旧版 agent 的静态 token。
+fn authorized(headers: &HeaderMap, auth: &DaemonAuth) -> bool {
+    bearer_token(headers).is_some_and(|credential| auth.authorizes_http(credential))
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("daemon.token");
+    path.with_file_name(format!(".{name}.{}.tmp", Uuid::new_v4()))
+}
+
+#[cfg(unix)]
+async fn set_private_dir_permissions(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await
+}
+
+#[cfg(not(unix))]
+async fn set_private_dir_permissions(path: &Path) -> Result<(), std::io::Error> {
+    crate::private_fs::restrict_to_current_user(path, true).await
+}
+
+#[cfg(unix)]
+async fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+}
+
+#[cfg(not(unix))]
+async fn set_private_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    crate::private_fs::restrict_to_current_user(path, false).await
+}
+
+#[cfg(test)]
+mod dispatch_tests;
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{attachment_disposition, authorized};
+    use crate::rpc::DaemonAuth;
+
+    #[test]
+    fn attachment_disposition_carries_utf8_name_and_safe_ascii_fallback() {
+        assert_eq!(
+            attachment_disposition("报告 v1.zip"),
+            "attachment; filename=\"__ v1.zip\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A%20v1.zip"
+        );
+        let quoted = attachment_disposition("a\"b\r\n%.bin");
+        assert!(quoted.starts_with("attachment; filename=\"a_b___.bin\""));
+        assert!(quoted.ends_with("filename*=UTF-8''a%22b%0D%0A%25.bin"));
+    }
+
+    #[test]
+    fn http_endpoints_accept_live_session_credentials_and_the_legacy_static_token() {
+        let auth = DaemonAuth::new("long-lived-token");
+        auth.register_http("connection", "session-credential".to_owned());
+        let mut headers = HeaderMap::new();
+        assert!(!authorized(&headers, &auth));
+        for (value, accepted) in [
+            ("Bearer session-credential", true),
+            // 旧版 agent 仍发送静态 token：daemon 作为校验方继续接受。
+            ("Bearer long-lived-token", true),
+            ("Bearer wrong", false),
+            ("session-credential", false),
+            ("Basic long-lived-token", false),
+        ] {
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_static(value));
+            assert_eq!(authorized(&headers, &auth), accepted, "{value}");
+        }
+    }
+}

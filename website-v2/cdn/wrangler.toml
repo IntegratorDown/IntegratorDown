@@ -1,0 +1,14 @@
+name = "integratordown-oss-cdn"
+main = "oss-proxy.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "dl-", custom_domain = true }]
+
+[vars]
+OSS_BUCKET = "zerx-lab"
+OSS_ENDPOINT = "oss-cn-beijing.aliyuncs.com"
+OSS_RELEASE_PREFIX = "IntegratorDownRelease"
+# auto 下载失败只回退这个仓库；必须与官网 GITHUB_REPO 保持一致。
+GITHUB_REPO = "zerx-lab/IntegratorDown"
+
+# 密钥：wrangler secret put OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET

@@ -1,0 +1,540 @@
+//! IntegratorCloud `/api/v1` 资源调用面。
+
+use reqwest::Method;
+use serde::Serialize;
+use serde_json::Value;
+
+use super::{CloudClient, CloudError};
+
+#[derive(Clone)]
+pub struct CloudApi {
+    client: CloudClient,
+    epoch: Option<super::client::RequestEpoch>,
+}
+
+impl CloudApi {
+    pub(crate) fn at_epoch(&self, epoch: super::client::RequestEpoch) -> Self {
+        Self {
+            client: self.client.clone(),
+            epoch: Some(epoch),
+        }
+    }
+
+    pub(crate) fn request_epoch(&self) -> super::client::RequestEpoch {
+        self.epoch.unwrap_or_else(|| self.client.request_epoch())
+    }
+
+    pub(crate) async fn lock_epoch(
+        &self,
+        epoch: super::client::RequestEpoch,
+    ) -> Result<tokio::sync::MutexGuard<'_, crate::state::AgentState>, CloudError> {
+        self.client.lock_epoch(epoch).await
+    }
+
+    #[must_use]
+    pub fn new(client: CloudClient) -> Self {
+        Self {
+            client,
+            epoch: None,
+        }
+    }
+
+    pub async fn profile(&self) -> Result<Value, CloudError> {
+        self.authed(Method::GET, "/api/v1/me", None::<&Value>).await
+    }
+
+    pub async fn devices(&self, device_id: &str) -> Result<Value, CloudError> {
+        self.authed(
+            Method::GET,
+            &format!("/api/v1/devices?deviceId={}", encode(device_id)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    /// `PATCH /devices/current`：按令牌里的设备定位本机，上报默认目录 / 路径风格 / 版本。
+    /// 旧版云端没有该端点（404）——调用方应忽略。
+    pub async fn patch_current_device<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.authed(Method::PATCH, "/api/v1/devices/current", Some(body))
+            .await
+    }
+
+    pub async fn rename_device(&self, id: &str, name: &str) -> Result<Value, CloudError> {
+        self.authed(
+            Method::PATCH,
+            &format!("/api/v1/devices/{}", encode(id)),
+            Some(&serde_json::json!({"name": name})),
+        )
+        .await
+    }
+
+    pub async fn delete_device(&self, id: &str) -> Result<Value, CloudError> {
+        self.authed(
+            Method::DELETE,
+            &format!("/api/v1/devices/{}", encode(id)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    pub async fn remote_tasks(&self) -> Result<Value, CloudError> {
+        self.authed(Method::GET, "/api/v1/tasks/remote", None::<&Value>)
+            .await
+    }
+
+    pub async fn dispatch_remote<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.authed(Method::POST, "/api/v1/tasks/dispatch", Some(body))
+            .await
+    }
+
+    pub async fn command_remote<P: Serialize>(
+        &self,
+        id: &str,
+        body: &P,
+    ) -> Result<Value, CloudError> {
+        self.authed(
+            Method::POST,
+            &format!("/api/v1/tasks/{}/command", encode(id)),
+            Some(body),
+        )
+        .await
+    }
+
+    pub async fn report_remote_status<P: Serialize>(
+        &self,
+        id: &str,
+        body: &P,
+    ) -> Result<Value, CloudError> {
+        self.authed(
+            Method::POST,
+            &format!("/api/v1/tasks/{}/status", encode(id)),
+            Some(body),
+        )
+        .await
+    }
+
+    pub async fn report_remote_progress<P: Serialize>(
+        &self,
+        body: &P,
+    ) -> Result<Value, CloudError> {
+        self.authed(Method::POST, "/api/v1/tasks/progress", Some(body))
+            .await
+    }
+
+    pub async fn ping_presence(&self) -> Result<Value, CloudError> {
+        self.authed(Method::POST, "/api/v1/tasks/presence", None::<&Value>)
+            .await
+    }
+
+    pub async fn remote_events(&self, device_id: &str) -> Result<reqwest::Response, CloudError> {
+        self.client
+            .authenticated_stream_epoch(
+                &format!("/api/v1/tasks/events?deviceId={}", encode(device_id)),
+                self.request_epoch(),
+            )
+            .await
+    }
+
+    pub async fn plans(&self) -> Result<Value, CloudError> {
+        self.client
+            .public::<Value, Value>(Method::GET, "/api/v1/plans/catalog", None)
+            .await
+    }
+
+    pub async fn create_order<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.authed(Method::POST, "/api/v1/orders", Some(body))
+            .await
+    }
+
+    pub async fn order(&self, order_no: &str) -> Result<Value, CloudError> {
+        self.authed(
+            Method::GET,
+            &format!("/api/v1/orders/{}", encode(order_no)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    pub async fn orders(&self) -> Result<Value, CloudError> {
+        self.authed(Method::GET, "/api/v1/orders", None::<&Value>)
+            .await
+    }
+
+    pub async fn referral(
+        &self,
+        suffix: &str,
+        method: Method,
+        body: Option<&Value>,
+    ) -> Result<Value, CloudError> {
+        self.authed(method, &format!("/api/v1/referral{suffix}"), body)
+            .await
+    }
+
+    pub async fn referral_codes(&self, page: u32, page_size: u32) -> Result<Value, CloudError> {
+        self.referral(
+            &format!("/codes?page={page}&pageSize={page_size}"),
+            Method::GET,
+            None,
+        )
+        .await
+    }
+
+    pub async fn delete_referral_code(&self, id: &str) -> Result<Value, CloudError> {
+        self.referral(&format!("/codes/{}", encode(id)), Method::DELETE, None)
+            .await
+    }
+
+    pub async fn referral_records(
+        &self,
+        page: u32,
+        page_size: u32,
+        search: Option<&str>,
+    ) -> Result<Value, CloudError> {
+        let mut suffix = format!("/records?page={page}&pageSize={page_size}");
+        if let Some(search) = search.filter(|value| !value.trim().is_empty()) {
+            suffix.push_str("&search=");
+            suffix.push_str(&encode(search.trim()));
+        }
+        self.referral(&suffix, Method::GET, None).await
+    }
+
+    pub async fn validate_referral(
+        &self,
+        code: &str,
+        plan_code: &str,
+    ) -> Result<Value, CloudError> {
+        self.referral(
+            &format!(
+                "/validate?code={}&planCode={}",
+                encode(code),
+                encode(plan_code)
+            ),
+            Method::GET,
+            None,
+        )
+        .await
+    }
+
+    pub async fn is_authenticated(&self) -> bool {
+        self.client.is_authenticated().await
+    }
+
+    pub(crate) fn session_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.client.session_changes()
+    }
+
+    pub async fn sync_events(&self, device_id: &str) -> Result<reqwest::Response, CloudError> {
+        self.client
+            .authenticated_stream_epoch(
+                &format!("/api/v1/sync/events?deviceId={}", encode(device_id)),
+                self.request_epoch(),
+            )
+            .await
+    }
+
+    pub async fn sync_pull(&self, since: u64, device_id: &str) -> Result<Value, CloudError> {
+        self.authed(
+            Method::GET,
+            &format!(
+                "/api/v1/sync/items?since={since}&deviceId={}",
+                encode(device_id)
+            ),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    pub async fn sync_push<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.authed(Method::PUT, "/api/v1/sync/items", Some(body))
+            .await
+    }
+
+    pub async fn cdn_config(&self) -> Result<Value, CloudError> {
+        self.authed(Method::GET, "/api/v1/cdn/config", None::<&Value>)
+            .await
+    }
+
+    pub async fn cdn_report<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.authed(Method::POST, "/api/v1/cdn/report", Some(body))
+            .await
+    }
+
+    // ---- 云端推送通知（契约 §3，`/api/v1/notifications/*`）----
+
+    /// `GET /notifications/catalog`：公开接口（匿名），返回管理员启用的渠道种类（固定顺序）。
+    pub async fn notify_catalog(
+        &self,
+    ) -> Result<Vec<integratordown_protocol::CloudNotifyKindDto>, CloudError> {
+        #[derive(serde::Deserialize)]
+        struct Catalog {
+            #[serde(default)]
+            kinds: Vec<integratordown_protocol::CloudNotifyKindDto>,
+        }
+        let catalog: Catalog = self
+            .client
+            .public::<Value, Catalog>(Method::GET, "/api/v1/notifications/catalog", None)
+            .await?;
+        Ok(catalog.kinds)
+    }
+
+    /// `GET /notifications/overview`。
+    pub async fn notify_overview(
+        &self,
+    ) -> Result<integratordown_protocol::CloudNotifyOverviewDto, CloudError> {
+        self.notify_call(Method::GET, "/overview", None::<&Value>)
+            .await
+    }
+
+    /// `POST /notifications/channels`。
+    pub async fn notify_create_channel(
+        &self,
+        params: &integratordown_protocol::CloudNotifyChannelCreateParams,
+    ) -> Result<integratordown_protocol::CloudNotifyChannelDto, CloudError> {
+        self.notify_call(Method::POST, "/channels", Some(params))
+            .await
+    }
+
+    /// `PATCH /notifications/channels/{id}`：只提交显式给出的字段（`id` 在路径里）。
+    pub async fn notify_update_channel(
+        &self,
+        params: &integratordown_protocol::CloudNotifyChannelUpdateParams,
+    ) -> Result<integratordown_protocol::CloudNotifyChannelDto, CloudError> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = &params.name {
+            body.insert("name".to_owned(), Value::from(name.as_str()));
+        }
+        if let Some(enabled) = params.enabled {
+            body.insert("enabled".to_owned(), Value::from(enabled));
+        }
+        if let Some(events) = &params.events {
+            body.insert("events".to_owned(), Value::from(events.clone()));
+        }
+        if let Some(addresses) = &params.addresses {
+            body.insert("addresses".to_owned(), Value::from(addresses.clone()));
+        }
+        self.notify_call(
+            Method::PATCH,
+            &format!("/channels/{}", encode(&params.id)),
+            Some(&Value::Object(body)),
+        )
+        .await
+    }
+
+    /// `DELETE /notifications/channels/{id}`。
+    pub async fn notify_delete_channel(&self, id: &str) -> Result<(), CloudError> {
+        let _: Value = self
+            .notify_call(
+                Method::DELETE,
+                &format!("/channels/{}", encode(id)),
+                None::<&Value>,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /notifications/email/code`：向非账号邮箱发 6 位验证码。
+    pub async fn notify_send_email_code(
+        &self,
+        address: &str,
+    ) -> Result<integratordown_protocol::CloudNotifyEmailCodeResult, CloudError> {
+        self.notify_call(
+            Method::POST,
+            "/email/code",
+            Some(&serde_json::json!({ "address": address })),
+        )
+        .await
+    }
+
+    /// `POST /notifications/email/verify`：校验验证码，把地址记为本账号已验证的通知邮箱。
+    pub async fn notify_verify_email(&self, address: &str, code: &str) -> Result<(), CloudError> {
+        let _: Value = self
+            .notify_call(
+                Method::POST,
+                "/email/verify",
+                Some(&serde_json::json!({ "address": address, "code": code })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /notifications/channels/{id}/test`（同步发送，不计额度）。
+    pub async fn notify_test_channel(
+        &self,
+        id: &str,
+    ) -> Result<integratordown_protocol::CloudNotifyTestResult, CloudError> {
+        self.notify_call(
+            Method::POST,
+            &format!("/channels/{}/test", encode(id)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    /// `POST /notifications/telegram/bind`。
+    pub async fn notify_telegram_bind(
+        &self,
+    ) -> Result<integratordown_protocol::CloudNotifyTelegramBindDto, CloudError> {
+        self.notify_call(Method::POST, "/telegram/bind", None::<&Value>)
+            .await
+    }
+
+    /// `GET /notifications/telegram/bind/{code}`。
+    pub async fn notify_telegram_bind_status(
+        &self,
+        code: &str,
+    ) -> Result<integratordown_protocol::CloudNotifyTelegramBindStatusDto, CloudError> {
+        self.notify_call(
+            Method::GET,
+            &format!("/telegram/bind/{}", encode(code)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    /// `GET /notifications/deliveries?limit=&before=`。
+    pub async fn notify_deliveries(
+        &self,
+        params: &integratordown_protocol::CloudNotifyDeliveriesParams,
+    ) -> Result<integratordown_protocol::CloudNotifyDeliveriesPage, CloudError> {
+        let mut query = format!("?limit={}", params.limit.unwrap_or(50).clamp(1, 100));
+        if let Some(before) = params.before.as_deref().filter(|value| !value.is_empty()) {
+            query.push_str("&before=");
+            query.push_str(&encode(before));
+        }
+        self.notify_call(Method::GET, &format!("/deliveries{query}"), None::<&Value>)
+            .await
+    }
+
+    /// `POST /notifications/events`：批量上报任务事件（≤ 50 条，由调用方分批）。
+    pub async fn notify_report_events<P: Serialize>(
+        &self,
+        events: &[P],
+    ) -> Result<NotifyReportResponse, CloudError> {
+        self.notify_call(
+            Method::POST,
+            "/events",
+            Some(&serde_json::json!({ "events": events })),
+        )
+        .await
+    }
+
+    async fn notify_call<P: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        suffix: &str,
+        body: Option<&P>,
+    ) -> Result<R, CloudError> {
+        let value = self
+            .authed(method, &format!("/api/v1/notifications{suffix}"), body)
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|error| CloudError::invalid_response(error.to_string()))
+    }
+
+    pub async fn profile_call<P: Serialize>(
+        &self,
+        method: Method,
+        suffix: &str,
+        body: Option<&P>,
+    ) -> Result<Value, CloudError> {
+        self.authed(method, &format!("/api/v1/me{suffix}"), body)
+            .await
+    }
+
+    pub(crate) async fn persist_profile(
+        &self,
+        epoch: super::client::RequestEpoch,
+        value: Value,
+    ) -> Result<integratordown_protocol::AgentSessionDto, CloudError> {
+        let profile = serde_json::from_value::<integratordown_protocol::CloudProfile>(value)
+            .map_err(|error| CloudError::invalid_response(error.to_string()))?;
+        self.client.persist_profile(epoch, profile).await
+    }
+
+    pub async fn clear_session(&self) -> Result<(), CloudError> {
+        self.client.clear_session().await
+    }
+
+    pub(crate) async fn clear_session_epoch(
+        &self,
+        epoch: super::client::RequestEpoch,
+    ) -> Result<(), CloudError> {
+        self.client.clear_session_epoch(epoch).await
+    }
+
+    /// 非用户主动结束会话：先发 `SessionRevoked(reason)` 再清会话。
+    pub async fn revoke_session(
+        &self,
+        reason: integratordown_protocol::ErrorReason,
+    ) -> Result<(), CloudError> {
+        self.client.revoke_session(reason).await
+    }
+
+    pub(crate) async fn revoke_session_epoch(
+        &self,
+        reason: integratordown_protocol::ErrorReason,
+        epoch: super::client::RequestEpoch,
+    ) -> Result<(), CloudError> {
+        self.client.revoke_session_epoch(reason, epoch).await
+    }
+
+    /// 当前登录账号 id；未登录为 `None`。
+    pub async fn current_user_id(&self) -> Option<String> {
+        self.client.current_user_id().await
+    }
+
+    #[must_use]
+    pub fn endpoint(&self) -> integratordown_protocol::CloudEndpointDto {
+        self.client.endpoint()
+    }
+
+    pub async fn set_endpoint(
+        &self,
+        base_url: &str,
+    ) -> Result<integratordown_protocol::CloudEndpointDto, CloudError> {
+        self.client.set_endpoint(base_url).await
+    }
+
+    async fn authed<P: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&P>,
+    ) -> Result<Value, CloudError> {
+        self.client
+            .authenticated_epoch(method, path, body, self.request_epoch())
+            .await
+    }
+}
+
+/// `POST /notifications/events` 响应：逐条结果与最新额度用量。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyReportResponse {
+    #[serde(default)]
+    pub results: Vec<NotifyReportResult>,
+    #[serde(default)]
+    pub usage: Option<integratordown_protocol::cloud_notify::CloudNotifyUsageDto>,
+}
+
+/// 单条事件的受理结果。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyReportResult {
+    pub delivery_id: String,
+    /// `accepted` / `duplicate` / `no_channel` / `quota_exceeded` / `disabled`。
+    pub outcome: String,
+}
+
+fn encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}

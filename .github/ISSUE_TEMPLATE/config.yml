@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 官网反馈 / Website Feedback
+    url: 
+    about: 通过官网反馈页提交问题或建议 / Submit a bug report or feature request through the website feedback page
+  - name: ❓ 常见问题 / FAQ
+    url: 
+    about: 提问前先看看常见问题 / Check the FAQ before opening an issue
+  - name: 🗳️ 社区投票 / Community Vote
+    url: 
+    about: 为想要的功能投票 / Vote for features you want

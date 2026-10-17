@@ -1,0 +1,57 @@
+//! 任务组详情窗口：IntegratorDown 辅助窗口标题栏；自建私有 `DownloadsController`，经 [`attach`] 订阅会话。
+
+use std::sync::Arc;
+
+use integratordown_ui_downloads::GroupDetailView;
+use integratordown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
+use gpui::{App, AppContext as _, px, size};
+use gpui_component::Root;
+
+use crate::{
+    app::Desktop,
+    downloads_port::AgentDownloadsPort,
+    session::attach,
+    windows::{RememberedWindow, WindowKey, WindowRegistry},
+};
+
+const GROUP_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(640.), px(480.));
+const GROUP_WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(480.), px(320.));
+
+/// 打开或聚焦任务组详情窗口。
+pub fn open(cx: &mut App, group_id: String) {
+    let desktop = Desktop::global(cx);
+    let translator = desktop.translator.clone();
+    let session = desktop.session.clone();
+    let client = desktop.client.clone();
+    let placeholder_title = translator.read(cx).text("groupDetailMembersTab").to_owned();
+
+    let mut options = auxiliary_window_options(placeholder_title);
+    options.window_min_size = Some(GROUP_WINDOW_MIN_SIZE);
+    WindowRegistry::restore_bounds(
+        RememberedWindow::GroupDetail,
+        &mut options,
+        GROUP_WINDOW_SIZE,
+        cx,
+    );
+
+    let key = WindowKey::GroupDetail(group_id.clone());
+    WindowRegistry::open_or_focus(cx, key, options, move |window, cx| {
+        let downloads_port = Arc::new(AgentDownloadsPort::new(client.clone()));
+        let detail = cx.new(|cx| {
+            GroupDetailView::new(
+                translator.clone(),
+                group_id.clone(),
+                downloads_port,
+                window,
+                cx,
+            )
+        });
+        attach(&session, &detail, cx);
+        let window_view = cx.new(|cx| {
+            AuxiliaryWindowView::new(translator, "groupDetailMembersTab", detail.into(), cx)
+        });
+        let root = cx.new(|cx| Root::new(window_view, window, cx));
+        WindowRegistry::persist_bounds(RememberedWindow::GroupDetail, client, &root, window, cx);
+        root
+    });
+}

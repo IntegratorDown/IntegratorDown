@@ -1,0 +1,100 @@
+# syntax=docker/dockerfile:1
+# IntegratorDown headless 服务器镜像：integratordown-agent --server + 同级 integratordownd（Web SPA 编译期内嵌进 agent）。
+# agent 作为 tini 的子进程拉起 integratordownd。
+# 多架构：linux/amd64 + linux/arm64。编译阶段固定跑在构建机原生架构
+# （--platform=$BUILDPLATFORM）并按 TARGETARCH 交叉编译，避免 QEMU 模拟下的
+# Rust 全量编译（数小时级）；仅最终运行时层按目标架构拉取。
+#
+# 构建上下文 = 仓库根目录（依赖根 .dockerignore 收窄上下文）：
+#   docker build -f docker/server.Dockerfile -t integratordown-server .
+#   docker buildx build --platform linux/amd64,linux/arm64 -f docker/server.Dockerfile .
+# 版本号 = 构建参数 INTEGRATORDOWN_APP_VERSION（发布流水线传 tag 版本；不传则回落 crate 版本）。
+#
+# 运行（首次打开 Web 界面时自行设置访问密钥；也可用 -e INTEGRATORDOWN_TOKEN=... 预置）：
+#   docker run -d -p 17800:17800 -v integratordown-data:/data integratordown-server
+
+# ── Stage 1: Web 前端（Vite SPA，bun 锁文件；产物架构无关，跑在构建机架构）──
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS web
+WORKDIR /src/web
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY web/ ./
+# Vite 别名从仓库根引用共享文案、GPUI 主题解析器与内置文件图标包（与 GPUI 同一份事实源）
+COPY assets/i18n/ /src/assets/i18n/
+COPY assets/icon-packs/ /src/assets/icon-packs/
+COPY website-v2/src/lib/gpui-theme/ /src/website-v2/src/lib/gpui-theme/
+RUN bun run build
+
+# ── Stage 2: Rust 服务器（workspace 成员，编译 integratordown_agent(web-ui) + integratordown_daemon，按 TARGETARCH 交叉编译）──
+# Linux 侧全 rustls（无 openssl），SQLite 由 sqlx 捆绑编译（cc 交叉工具链），无额外系统依赖。
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS server
+ARG TARGETARCH
+WORKDIR /src
+# aarch64 交叉链接器 / cc（libsqlite3-sys 等 build script 用）
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+RUN case "$TARGETARCH" in \
+      amd64) echo x86_64-unknown-linux-gnu > /rust-target && echo '-C target-cpu=x86-64' > /rust-flags ;; \
+      arm64) echo aarch64-unknown-linux-gnu > /rust-target && : > /rust-flags \
+        && rustup target add aarch64-unknown-linux-gnu \
+        && apt-get update \
+        && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+        && rm -rf /var/lib/apt/lists/* ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac
+COPY Cargo.toml Cargo.lock ./
+# .cargo/config.toml 的 x86-64-v2 只服务桌面产物；镜像面向 NAS/老服务器，amd64 用
+# RUSTFLAGS（整体替换 config 的 rustflags，该文件当前只有 target-cpu 一项）回退基线 x86-64。
+COPY .cargo/ .cargo/
+# cargo 解析 workspace 时要读全部成员的 manifest，包括桌面开发工具。
+COPY native/ native/
+COPY crates/ crates/
+COPY scripts/desktop-dev/ scripts/desktop-dev/
+# 根 Cargo.toml 的 [patch.crates-io] 指向 third_party/librqbit-dualstack-sockets。
+COPY third_party/ third_party/
+# notification.rs 在 Linux 上 include_bytes! 应用图标。
+COPY assets/logo/ assets/logo/
+# Web SPA 在编译期由 integratordown_agent（feature web-ui）按 INTEGRATORDOWN_EMBED_WEBROOT
+# 嵌入二进制（运行时层不再有 web/ 目录，也无需 INTEGRATORDOWN_WEBROOT）。
+COPY --from=web /src/web/dist /webroot
+ENV INTEGRATORDOWN_EMBED_WEBROOT=/webroot
+# 编译期匿名统计 App-Key 注入（空值 = 未注入，统计整体禁用）
+ARG INTEGRATORDOWN_ANALYTICS_APP_KEY
+ENV INTEGRATORDOWN_ANALYTICS_APP_KEY=$INTEGRATORDOWN_ANALYTICS_APP_KEY
+# 产品版本（option_env!，发布流水线传 tag 版本；缺省回落 crate 版本）
+ARG INTEGRATORDOWN_APP_VERSION
+ENV INTEGRATORDOWN_APP_VERSION=$INTEGRATORDOWN_APP_VERSION
+# IntegratorCloud base URL 编译期烘焙进 agent（option_env!；运行期 INTEGRATORCLOUD_BASE_URL 可覆盖；缺省 127.0.0.1:8720）
+ARG INTEGRATORCLOUD_BASE_URL
+ENV INTEGRATORCLOUD_BASE_URL=$INTEGRATORCLOUD_BASE_URL
+# cache mount：本地重复构建增量编译；registry 缓存避免重复下载。
+# id 必须按 TARGETARCH 隔离：buildx 多平台构建里 amd64/arm64 两个 server 阶段并发跑，
+# 共享同一份 registry 缓存会让两个 cargo 同时解包同一个 crate（`.cargo-ok` File exists
+# → error: failed to unpack package）。sharing=locked 再兜住同架构重试的并发。
+RUN --mount=type=cache,id=integratordown-cargo-registry-$TARGETARCH,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=integratordown-cargo-target-$TARGETARCH,target=/src/target,sharing=locked \
+    RUSTFLAGS="$(cat /rust-flags)" cargo build --release --locked -p integratordown_agent --features web-ui --target "$(cat /rust-target)" \
+    && RUSTFLAGS="$(cat /rust-flags)" cargo build --release --locked -p integratordown_daemon --target "$(cat /rust-target)" \
+    && cp "target/$(cat /rust-target)/release/integratordown-agent" "target/$(cat /rust-target)/release/integratordownd" /usr/local/bin/
+
+# ── Stage 3: 运行时（目标架构 debian-slim + ca-certificates，rustls 读系统根证书）──
+# xz-utils：托管 ffmpeg 组件在 Linux 上是 .tar.xz，components/ffmpeg.rs 走系统 `tar -xJf` 解压（#649）
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl tini xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+# integratordownd 必须与 integratordown-agent 同目录（agent 按同级路径拉起 daemon）
+COPY --from=server /usr/local/bin/integratordown-agent /usr/local/bin/integratordownd /app/
+# INTEGRATORDOWN_BIND / INTEGRATORDOWN_DATABASE_URL / INTEGRATORDOWN_DEMO / INTEGRATORDOWN_LANG 等见 native/agent 的 server 模式说明
+# INTEGRATORDOWN_INSTALL_SOURCE：容器内替换二进制会随重建丢失，应用内更新改为提示拉取新镜像。
+ENV INTEGRATORDOWN_BIND=0.0.0.0:17800 \
+    INTEGRATORDOWN_DATA_DIR=/data \
+    INTEGRATORDOWN_INSTALL_SOURCE=docker
+VOLUME /data
+EXPOSE 17800
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD curl -fsS "http://127.0.0.1:${INTEGRATORDOWN_BIND##*:}/ping" || exit 1
+# tini 作 PID 1：转发 SIGTERM 给 agent（agent 会关停 daemon）并回收子进程
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/integratordown-agent", "--server"]

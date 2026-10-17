@@ -1,0 +1,398 @@
+---
+/**
+ * 03 · 原生:三进程架构的粒子等距爆炸图(arch-field.ts)。滚动进度(0→1)让四层平面逐层分离,
+ * 右侧列表同步高亮当前层;悬停平面与悬停列表项双向联动。大屏为 sticky 滚动叙事,小屏直接展示展开态。
+ */
+import { AppWindow, Cpu, RadioTower, Server } from "lucide-react";
+import { home } from "../../i18n/messages/home";
+import type { Lang } from "../../i18n/config";
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = home[lang].native;
+const title = t.title.replace(/<em>(.*?)<\/em>/g, '<span class="serif">$1</span>');
+const icons = [AppWindow, RadioTower, Server, Cpu];
+// 自上而下:界面在最上层,引擎在最底层
+const layers = t.layers.map((layer, i) => ({ ...layer, Icon: icons[i] ?? Cpu, depth: t.layers.length - 1 - i }));
+// 画布按深度(0 = 引擎)索引层名
+const labelsByDepth = [...layers].sort((a, b) => a.depth - b.depth).map((layer) => layer.id);
+// 生命周期徽标样式(与 t.layers 同序):界面按需启动,agent / daemon 常驻,引擎在 daemon 进程内
+const LIFE = ["demand", "resident", "resident", "inproc"] as const;
+const facts = [
+  { k: t.noWebview, v: t.noWebviewDesc },
+  { k: t.resident, v: t.residentDesc },
+  { k: t.persistent, v: t.persistentDesc },
+];
+---
+
+<section class="frame">
+  <div class="rule"></div>
+  <div class="section pb-0">
+    <div class="grid gap-6 lg:grid-cols-2 lg:items-end grid-cols-1">
+      <div class="flex flex-col gap-6">
+        <span class="eyebrow" data-scramble>{t.eyebrow}</span>
+        <h2 class="h2" data-reveal set:html={title} />
+      </div>
+      <p class="lede lg:max-w-[48ch] lg:justify-self-end" data-reveal style="--d:1">{t.lede}</p>
+    </div>
+  </div>
+
+  <div class="arch" data-arch>
+    <div class="arch-sticky">
+      <div class="arch-stage" aria-hidden="true">
+        <canvas class="arch-canvas" data-arch-canvas data-labels={JSON.stringify(labelsByDepth)}></canvas>
+      </div>
+
+      <figure class="arch-list">
+        <figcaption class="fig-bar">
+          <span>fig. 03</span>
+          <span>{t.figure}</span>
+        </figcaption>
+        <ol class="arch-rail">
+          {
+            layers.map((layer, i) => (
+              <Fragment>
+                <li class="arch-item" data-layer={layer.depth}>
+                  <span class="arch-node">
+                    <layer.Icon size={16} strokeWidth={1.75} />
+                    <i class="arch-ping" data-arch-ping />
+                  </span>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                      <span class="mono text-[13px] font-medium text-fg">{layer.id}</span>
+                      <span class="arch-role mono">{layer.role}</span>
+                      <span class="arch-life mono" data-life={LIFE[i]}>
+                        <i />
+                        {layer.life}
+                      </span>
+                    </div>
+                    <p class="mt-1.5 text-[13.5px] leading-relaxed text-muted">{layer.desc}</p>
+                  </div>
+                  <span class="arch-index mono">L{layer.depth}</span>
+                </li>
+                {t.links[i] && (
+                  <li class="arch-link" aria-hidden="true">
+                    <span class="mono">{t.links[i]}</span>
+                  </li>
+                )}
+              </Fragment>
+            ))
+          }
+        </ol>
+        <div class="arch-legend mono">
+          <span class="flex items-center gap-1.5"><i class="arch-key" data-dir="up"></i>{t.legendUp} ↑</span>
+          <span class="flex items-center gap-1.5"><i class="arch-key" data-dir="down"></i>{t.legendDown} ↓</span>
+          <span class="arch-hint">{t.hint}</span>
+        </div>
+      </figure>
+    </div>
+  </div>
+
+  <div class="cells border-t border-line md:grid-cols-3 grid-cols-1" data-circuit>
+    {
+      facts.map((fact, i) => (
+        <div class="cell spot spot-edge flex flex-col gap-2" data-reveal style={`--d:${i}`}>
+          <h3 class="text-[16px] font-medium text-fg">{fact.k}</h3>
+          <p class="text-[14px] leading-relaxed text-muted">{fact.v}</p>
+        </div>
+      ))
+    }
+  </div>
+</section>
+
+<script>
+  import { mountStage } from "../../scripts/particle-stage";
+  import { ArchField } from "./arch-field";
+
+  const arch = document.querySelector<HTMLElement>("[data-arch]");
+  const stage = arch?.querySelector<HTMLElement>(".arch-stage");
+  const canvas = arch?.querySelector<HTMLCanvasElement>("[data-arch-canvas]");
+  if (arch && stage && canvas) {
+    const items = [...arch.querySelectorAll<HTMLElement>("[data-layer]")];
+    const layerCount = items.length;
+    const field = new ArchField(JSON.parse(canvas.dataset.labels ?? "[]") as string[]);
+    // 悬停平面 → 高亮列表项;悬停列表项 → 点亮平面
+    field.onHover = (depth) => items.forEach((el) => el.toggleAttribute("data-hover", Number(el.dataset.layer) === depth));
+    for (const el of items) {
+      el.addEventListener("pointerenter", () => field.setFocus(Number(el.dataset.layer)));
+      el.addEventListener("pointerleave", () => field.setFocus(null));
+    }
+    // 数据包抵达某层 → 对应列表节点泛起一圈(上行 cyan / 下行 accent),每项限流
+    const lastPing = new Map<number, number>();
+    field.onPulse = (depth, up) => {
+      const now = performance.now();
+      if (now - (lastPing.get(depth) ?? 0) < 160) return;
+      lastPing.set(depth, now);
+      const ping = items.find((el) => Number(el.dataset.layer) === depth)?.querySelector<HTMLElement>("[data-arch-ping]");
+      if (!ping) return;
+      ping.dataset.dir = up ? "up" : "down";
+      ping.animate([{ transform: "scale(0.7)", opacity: 0.9 }, { transform: "scale(1.9)", opacity: 0 }], { duration: 700, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+    };
+
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const wide = window.matchMedia("(min-width: 1024px)");
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      let p = 1;
+      if (wide.matches && !reduced) {
+        const rect = arch.getBoundingClientRect();
+        const travel = rect.height - window.innerHeight;
+        p = travel > 0 ? Math.min(1, Math.max(0, -rect.top / travel)) : 1;
+      }
+      field.setProgress(p);
+      // 列表自上而下(界面 → 引擎)依次点亮
+      const active = Math.min(layerCount - 1, Math.floor(p * layerCount));
+      const activeDepth = layerCount - 1 - active;
+      field.setActive(activeDepth);
+      items.forEach((el) => el.toggleAttribute("data-active", Number(el.dataset.layer) === activeDepth));
+    };
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(update);
+    };
+    update();
+    mountStage(canvas, stage, field);
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    wide.addEventListener("change", schedule);
+  }
+</script>
+
+<style is:global>
+  @layer components {
+    .arch {
+      position: relative;
+    }
+    .arch-sticky {
+      display: grid;
+      gap: 40px;
+      padding: 40px clamp(20px, 4vw, 56px) 64px;
+    }
+    @media (min-width: 1024px) {
+      .arch {
+        height: 180vh;
+      }
+      .arch-sticky {
+        position: sticky;
+        top: var(--header-h);
+        height: calc(100vh - var(--header-h));
+        grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+        align-items: center;
+        padding-block: 24px;
+      }
+    }
+    .arch-stage {
+      position: relative;
+      min-height: 400px;
+    }
+    @media (min-width: 1024px) {
+      .arch-stage {
+        align-self: stretch;
+        min-height: 0;
+      }
+    }
+    .arch-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .arch-list {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--bg-elev);
+      box-shadow: 0 24px 48px -32px oklch(0 0 0 / 0.25);
+    }
+    .arch-rail {
+      display: flex;
+      flex-direction: column;
+      padding-block: 6px;
+    }
+    /* 列表即纵向链路:节点 → 连接段(带流动虚线与传输方式)→ 节点 */
+    .arch-item {
+      --rail-x: 37px;
+      position: relative;
+      display: flex;
+      gap: 14px;
+      padding: 14px 18px 14px 20px;
+      transition: background-color 300ms;
+    }
+    .arch-item::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      border-radius: 2px;
+      background: var(--accent);
+      transform: scaleY(0);
+      transition: transform 300ms var(--ease-out);
+    }
+    .arch-item::after {
+      content: "";
+      position: absolute;
+      left: var(--rail-x);
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--line-strong);
+    }
+    .arch-item:first-child::after {
+      top: 50%;
+    }
+    .arch-item:last-child::after {
+      bottom: 50%;
+    }
+    .arch-item[data-active],
+    .arch-item[data-hover] {
+      background: var(--bg-sunken);
+    }
+    .arch-item[data-active]::before {
+      transform: none;
+    }
+    .arch-node {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      flex: none;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      color: var(--fg-muted);
+      background: var(--bg-elev);
+      box-shadow:
+        0 0 0 1px var(--line-strong) inset,
+        0 1px 2px oklch(0 0 0 / 0.05);
+      transition:
+        color 300ms,
+        background-color 300ms,
+        box-shadow 300ms;
+    }
+    .arch-item[data-active] .arch-node,
+    .arch-item[data-hover] .arch-node {
+      color: var(--accent-ink);
+      background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg-elev);
+      box-shadow:
+        0 0 0 1px var(--accent-line) inset,
+        0 0 0 4px color-mix(in oklch, var(--accent-soft) 70%, transparent);
+    }
+    /* 数据包抵达时的涟漪(Native.astro 用 WAAPI 触发) */
+    .arch-ping {
+      position: absolute;
+      inset: -1px;
+      border-radius: inherit;
+      border: 1.5px solid var(--accent);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .arch-ping[data-dir="up"] {
+      border-color: var(--cyan);
+    }
+    .arch-role {
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--fg-subtle);
+      background: var(--bg-inset);
+    }
+    .arch-life {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      font-size: 10.5px;
+      color: var(--fg-muted);
+    }
+    .arch-life i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+    .arch-life[data-life="resident"] i {
+      background: var(--ok);
+      box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 50%, transparent);
+      animation: pulse 2s ease-out infinite;
+    }
+    .arch-life[data-life="demand"] i {
+      box-shadow: 0 0 0 1.5px var(--fg-subtle) inset;
+    }
+    .arch-life[data-life="inproc"] i {
+      border-radius: 2px;
+      background: var(--accent);
+    }
+    .arch-index {
+      align-self: flex-start;
+      padding-top: 2px;
+      font-size: 10.5px;
+      color: var(--fg-subtle);
+    }
+    .arch-link {
+      position: relative;
+      display: flex;
+      align-items: center;
+      height: 26px;
+      padding-left: 62px;
+    }
+    .arch-link::before {
+      content: "";
+      position: absolute;
+      left: 37px;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: repeating-linear-gradient(to bottom, var(--accent) 0 4px, transparent 4px 9px) 0 0 / 1px 18px;
+      animation: arch-flow 0.9s linear infinite;
+    }
+    @keyframes arch-flow {
+      to {
+        background-position: 0 18px;
+      }
+    }
+    .arch-link span {
+      padding: 1px 7px;
+      border-radius: 99px;
+      font-size: 10.5px;
+      color: var(--fg-subtle);
+      background: var(--bg-sunken);
+      box-shadow: 0 0 0 1px var(--line) inset;
+    }
+    .arch-legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 16px;
+      padding: 10px 18px;
+      border-top: 1px solid var(--line);
+      font-size: 10.5px;
+      color: var(--fg-subtle);
+      background: var(--bg-sunken);
+    }
+    .arch-key {
+      width: 2px;
+      height: 11px;
+      border-radius: 2px;
+      background: var(--accent);
+    }
+    .arch-key[data-dir="up"] {
+      background: var(--cyan);
+      box-shadow: 0 0 6px var(--cyan);
+    }
+    .arch-hint {
+      margin-left: auto;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .arch-link::before,
+      .arch-life[data-life="resident"] i {
+        animation: none;
+      }
+    }
+  }
+</style>

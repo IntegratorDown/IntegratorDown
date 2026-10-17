@@ -1,0 +1,33 @@
+import FluxDomain
+import FluxUI
+import SwiftUI
+
+@main
+struct IntegratorDownApp: App {
+    @State private var container = AppContainer()
+
+    init() {
+        // 冷启动即设置通知中心代理：点按通知启动 App 时的回调不会丢。
+        _ = NotificationService.shared
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                // 挂在外观 / 强调色环境之内（外层 `.environment` / `.preferredColorScheme` 才对它生效）。
+                // 112 = `Assets.xcassets/LaunchMark` 的点尺寸（logo 400 单位画框，`scripts/gen_icons.ts` 生成）。
+                .launchReveal(markSide: 112)
+                .backgroundTransfers()
+                .settingsEffects()
+                .environment(container)
+                .environment(container.store)
+                .environment(container.router)
+                .environment(container.appearance)
+                .environment(container.viewPrefs)
+                .environment(container.toasts)
+                .tint(container.appearance.accent.color)
+                .environment(\.fluxAccent, container.appearance.accent)
+                .preferredColorScheme(container.appearance.mode.colorScheme)
+        }
+    }
+}

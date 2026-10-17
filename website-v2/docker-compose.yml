@@ -1,0 +1,41 @@
+# 主站：与 website/（v1 旧站，project=integratordown，容器 integratordown-website，宿主端口 4321）并行部署，
+# project / 镜像 / 容器名 / 宿主端口都必须与 v1 区分，否则会互相覆盖。
+# 反代： → 127.0.0.1:4322（根部署）；/v2/ 旧预览地址由反代 301 到根。
+# 宿主端口沿用预览期分配、不与 v1 对调：两条部署流水线执行顺序不定，对调会让先部署的一方撞端口。
+name: integratordown-v2
+services:
+  website:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 站点挂载前缀（构建期固化进产物）；默认空串 = 根部署，子路径部署时设 SITE_BASE=/xxx
+        SITE_BASE: ${SITE_BASE-}
+    image: integratordown-website-v2:latest
+    container_name: integratordown-website-v2
+    restart: unless-stopped
+    ports:
+      - "4322:4321"
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=4321
+      # 从 .env 文件读取敏感配置（不提交到 Git）
+      - GITHUB_REPO=${GITHUB_REPO}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - AFDIAN_USER_ID=${AFDIAN_USER_ID}
+      - AFDIAN_TOKEN=${AFDIAN_TOKEN}
+    env_file:
+      - .env
+    healthcheck:
+      # busybox wget 会先解析 localhost 到 ::1，而 node 只监听 IPv4，必须用 127.0.0.1
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4321${SITE_BASE-}/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

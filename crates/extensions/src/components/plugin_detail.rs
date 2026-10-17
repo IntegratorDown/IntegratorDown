@@ -1,0 +1,262 @@
+//! 插件详情对话框：已安装插件与市场条目共用（manifest 级信息 + 权限 + 使用须知）。
+
+use std::rc::Rc;
+
+use integratordown_protocol::{MarketEntryDto, PluginDto};
+use integratordown_ui_components::{dialog_scroll_body, tabular_numbers};
+use integratordown_ui_i18n::Translator;
+use integratordown_ui_theme::active_theme;
+use gpui::{App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div};
+use gpui_component::{WindowExt as _, h_flex, link::Link, v_flex};
+
+use crate::{pages::Frame, ui};
+
+/// 详情对话框的数据；调用侧从各自 DTO 拆字段。
+#[derive(Clone, Debug, Default)]
+pub struct PluginDetail {
+    pub name: String,
+    pub version: String,
+    pub identity: String,
+    pub description: String,
+    pub homepage: String,
+    pub author: String,
+    pub tags: Vec<String>,
+    pub publish_time: String,
+    pub min_app_version: String,
+    pub settings_count: usize,
+    pub permissions: Vec<String>,
+    pub yanked_label: Option<String>,
+}
+
+impl PluginDetail {
+    pub fn from_plugin(plugin: &PluginDto) -> Self {
+        Self {
+            name: plugin.name.clone(),
+            version: plugin.version.clone(),
+            identity: plugin.identity.clone(),
+            description: plugin.description.clone(),
+            homepage: plugin.homepage.clone(),
+            settings_count: plugin.settings.len(),
+            permissions: plugin.permissions.clone(),
+            ..Self::default()
+        }
+    }
+
+    pub fn from_market(entry: &MarketEntryDto, translator: &Translator) -> Self {
+        Self {
+            name: if entry.name.is_empty() {
+                entry.plugin_id.clone()
+            } else {
+                entry.name.clone()
+            },
+            version: entry.version.clone(),
+            identity: entry.plugin_id.clone(),
+            description: entry.description.clone(),
+            homepage: entry.homepage.clone(),
+            author: entry.author.clone(),
+            tags: entry.tags.clone(),
+            publish_time: entry.publish_time.clone(),
+            min_app_version: entry.min_app_version.clone(),
+            settings_count: 0,
+            permissions: entry.permissions.clone(),
+            yanked_label: yanked_label(translator, &entry.yanked),
+        }
+    }
+}
+
+/// 市场 `yanked` 标记 → 文案；空 / 未知值不展示。
+pub fn yanked_label(translator: &Translator, yanked: &str) -> Option<String> {
+    let key = match yanked {
+        "deprecated" => "marketYankedDeprecated",
+        "vulnerable" => "marketYankedVulnerable",
+        "malicious" => "marketYankedMalicious",
+        _ => return None,
+    };
+    Some(translator.text(key).to_owned())
+}
+
+/// 权限 → （展示名，说明）；未知权限降级展示原始名。
+pub fn permission_label(translator: &Translator, permission: &str) -> (String, String) {
+    match permission {
+        "ffmpeg" => (
+            translator.text("pluginPermFfmpegName").to_owned(),
+            translator.text("pluginPermFfmpegDesc").to_owned(),
+        ),
+        "ytdlp" => (
+            translator.text("pluginPermYtdlpName").to_owned(),
+            translator.text("pluginPermYtdlpDesc").to_owned(),
+        ),
+        "auth" => (
+            translator.text("pluginPermAuthName").to_owned(),
+            translator.text("pluginPermAuthDesc").to_owned(),
+        ),
+        other => (
+            other.to_owned(),
+            translator.text("pluginPermUnknownDesc").to_owned(),
+        ),
+    }
+}
+
+/// 打开详情对话框；对话框构造器每帧重建，内容从共享的只读快照按需渲染。
+pub fn open_plugin_detail(
+    detail: PluginDetail,
+    translator: Translator,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let detail = Rc::new(detail);
+    let translator = Rc::new(translator);
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let detail = detail.clone();
+        let translator = translator.clone();
+        dialog
+            .title(integratordown_ui_components::dialog_title(
+                detail.name.clone(),
+                cx,
+            ))
+            .w(active_theme(cx).text_extent(480.))
+            .content(move |root, _, cx| {
+                root.min_h_0().child(dialog_scroll_body(
+                    "plugin-detail-body",
+                    None,
+                    render_detail(&detail, &translator, cx),
+                    cx,
+                ))
+            })
+    });
+}
+
+/// 信息行标签列宽：容纳「最低应用版本」等最长标签。
+const LABEL_WIDTH: f32 = 96.;
+
+fn render_detail(detail: &PluginDetail, translator: &Translator, cx: &App) -> impl IntoElement {
+    let theme = active_theme(cx);
+    let frame = Frame {
+        translator,
+        tokens: theme.tokens(),
+        extended: theme.extended(),
+        components: theme.components(),
+        stale: false,
+    };
+    let tokens = frame.tokens;
+    let text = |key: &str| SharedString::from(translator.text(key).to_owned());
+    let label_cell = |label: SharedString| {
+        ui::meta_text(label, frame)
+            .w(theme.text_extent(LABEL_WIDTH))
+            .flex_shrink_0()
+    };
+    let info_row = |label: SharedString, value: String| {
+        h_flex()
+            .w_full()
+            .gap(tokens.spacing.md)
+            .items_baseline()
+            .child(label_cell(label))
+            .child(ui::body_text(value, frame).flex_1().min_w_0())
+    };
+    // 分区标题：caption MEDIUM + 三级文字色。
+    let section_title = |label: SharedString| {
+        div()
+            .pt(tokens.spacing.sm)
+            .text_size(frame.extended.caption.size)
+            .line_height(frame.extended.caption.line_height)
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(frame.extended.colors.text_tertiary)
+            .child(label)
+    };
+    let permissions = detail
+        .permissions
+        .iter()
+        .map(|permission| {
+            let (name, description) = permission_label(translator, permission);
+            v_flex()
+                .w_full()
+                .gap(tokens.spacing.xxs)
+                .child(ui::title_text(name, frame))
+                .child(ui::meta_text(description, frame))
+        })
+        .collect::<Vec<_>>();
+    let mut content = v_flex().w_full().gap(tokens.spacing.sm).child(
+        h_flex()
+            .gap(tokens.spacing.sm)
+            .items_center()
+            .flex_wrap()
+            .child(
+                ui::meta_text(format!("v{}", detail.version), frame)
+                    .font_features(tabular_numbers()),
+            )
+            .children(
+                detail
+                    .yanked_label
+                    .clone()
+                    .map(|label| ui::tone_pill(label, tokens.colors.destructive, frame)),
+            )
+            .children(
+                detail
+                    .tags
+                    .iter()
+                    .cloned()
+                    .map(|tag| ui::neutral_pill(tag, frame)),
+            ),
+    );
+    content = content.child(info_row(
+        text("pluginDetailIdentity"),
+        detail.identity.clone(),
+    ));
+    if !detail.author.is_empty() {
+        content = content.child(info_row(text("pluginDetailAuthor"), detail.author.clone()));
+    }
+    if ui::is_web_url(&detail.homepage) {
+        content = content.child(
+            h_flex()
+                .w_full()
+                .gap(tokens.spacing.md)
+                .items_baseline()
+                .child(label_cell(text("pluginDetailHomepage")))
+                .child(
+                    Link::new("plugin-detail-homepage")
+                        .href(detail.homepage.clone())
+                        .text_size(tokens.typography.sm.size)
+                        .child(detail.homepage.clone()),
+                ),
+        );
+    } else if !detail.homepage.is_empty() {
+        content = content.child(info_row(
+            text("pluginDetailHomepage"),
+            detail.homepage.clone(),
+        ));
+    }
+    if !detail.publish_time.is_empty() {
+        content = content.child(info_row(
+            text("pluginDetailPublishTime"),
+            detail.publish_time.clone(),
+        ));
+    }
+    if !detail.min_app_version.is_empty() {
+        content = content.child(info_row(
+            text("pluginDetailMinAppVersion"),
+            detail.min_app_version.clone(),
+        ));
+    }
+    if detail.settings_count > 0 {
+        content = content.child(info_row(
+            text("pluginDetailSettings"),
+            translator.text_with(
+                "pluginDetailSettingsCount",
+                &[("count", &detail.settings_count.to_string())],
+            ),
+        ));
+    }
+    if !detail.description.is_empty() {
+        content = content
+            .child(section_title(text("pluginDetailDescription")))
+            .child(ui::body_text(detail.description.clone(), frame));
+    }
+    if !permissions.is_empty() {
+        content = content
+            .child(section_title(text("pluginDetailPermissions")))
+            .children(permissions);
+    }
+    content
+        .child(section_title(text("pluginDetailUsage")))
+        .child(ui::meta_text(text("pluginDetailUsageBody"), frame))
+}
